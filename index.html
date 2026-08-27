@@ -33,7 +33,6 @@
 ### TO DO:
     - Movement/Order system
     - Multiplayer turn loop
-        - Need "Hot Seat" method, should implement early for local testing
     - Conflict resolution system
 
 ### Thoughts
@@ -83,8 +82,7 @@
                 const y = this.tileSize * (3 / 2 * r);
                 return { x: this.originX + x, y: this.originY + y };
             }
-            
-            // In BoardRenderer
+
             getTileAtPixel(px, py) {
                 // Pointy-topped inverse: https://www.redblobgames.com/grids/hexagons/#pixel-to-hex
                 const q = ((px - this.originX) * Math.sqrt(3)/3 - (py - this.originY) / 3) / this.tileSize;
@@ -108,11 +106,11 @@
 
             render(board, game, visibleKeys) {
                 this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-                this.renderTiles(board, visibleKeys);
+                this.renderTiles(board, game, visibleKeys);
                 this.renderOverlay(board, game, visibleKeys);
             }
 
-            renderTiles(board, visibleKeys) {
+            renderTiles(board, game, visibleKeys) {
                 for (const tile of board.tiles) {
                     const key = `${tile.q},${tile.r}`;
                     const { x, y } = this.axialToPixel(tile.q, tile.r);
@@ -120,7 +118,11 @@
                         this.drawFog(x, y);
                         continue;
                     }
-                    this.drawHex(x, y, this.terrainColor);
+
+                    // Get owner color or default to terrain
+                    const pop = game.population.get(key);
+                    const fillColor = pop?.ownerId ? game.getPlayerById(pop.ownerId)?.color || this.terrainColor : this.terrainColor;
+                    this.drawHex(x, y, fillColor);
                 }
             }
 
@@ -167,7 +169,7 @@
                 }
                 this.ctx.closePath();
 
-                // Fill terrain color
+                // Fill with owner color or terrain
                 this.ctx.fillStyle = fillColor;
                 this.ctx.fill();
 
@@ -199,9 +201,10 @@
                 });
 
                 document.getElementById('endTurnBtn').addEventListener('click', () => {
+                    console.log(`--- Processing turn for ${this.currentPlayer.name} (Ratio: ${this.currentPlayer.civilianRatio * 100}%) ---`);
                     this.game.processTurn(this.currentPlayer);
+                    console.log("Population after turn:", Object.fromEntries(this.game.population));
                     this.render();
-                    console.log("Game Object:", this.game);
                 });
             }
 
@@ -228,7 +231,7 @@
                     ` 💂 Soldiers: ${total.soldiers} | ` +
                     ` 👶 Babies: ${total.babies}`;
             }
-        }// GameUI
+       }// GameUI
 
         // A tile is currently just a coordinate on the board.
         // Terrain and number tokens are intentionally omitted while the core
@@ -314,14 +317,18 @@
             constructor() {
                 this.hexBoard = new HexBoard(2);
                 this.players = [
-                    new Player(1, "Player 1", "red", 0),
-                    new Player(2, "Player 2", "blue", 0)
+                    new Player(1, "Player 1", "#ff5252", 0),  // Red
+                    new Player(2, "Player 2", "#4285f4", 0)   // Blue
                 ];
                 this.population = new Map(); // "q,r" -> TilePopulation
                 this.setupStartingTiles();
             }
 
             key(q, r) { return `${q},${r}`; }
+
+            getPlayerById(id) {
+                return this.players.find(p => p.id === id);
+            }
 
             getPopulation(q, r) {
                 return this.population.get(this.key(q, r));
@@ -364,24 +371,35 @@
                 for (const [key, pop] of this.population) {
                     if (pop.ownerId !== player.id) continue;
 
+                    console.log(`Processing tile ${key}:`, { ...pop });
+
                     // 1. Existing babies mature.
-                    // For the first deterministic prototype, the ratio is
-                    // applied to the whole number of babies using floor().
                     const babiesToMature = pop.babies;
-
-                    const newCivilians = Math.floor(
-                        babiesToMature * player.civilianRatio
-                    );
-
+                    const newCivilians = Math.floor(babiesToMature * player.civilianRatio);
                     const newSoldiers = babiesToMature - newCivilians;
+
+                    // FIX: Calculate new babies BEFORE adding matured civilians/soldiers
+                    const newBabies = Math.floor(pop.civilians / 2);
 
                     pop.civilians += newCivilians;
                     pop.soldiers += newSoldiers;
+                    pop.babies = newBabies;
 
-                    // 2. Generate a NEW generation of babies.
-                    // These babies remain babies until the next turn.
-                    pop.babies = Math.floor(pop.civilians / 2);
+                    console.log(`  After maturation: +${newCivilians}🧑‍🌾 +${newSoldiers}💂 → ${newBabies}👶`);
                 }
+            }
+
+            resolveConflict(tileKey, attackers) {
+                // attackers: Map<playerId, soldierCount>
+                const pop = this.population.get(tileKey);
+                const defenderId = pop?.ownerId;
+                const defenderCount = pop?.soldiers || 0;
+
+                // If tile is owned, defender has advantage
+                // If unowned, largest army has advantage
+                // Use dice rolls (e.g., 1d6 per soldier, highest total wins)
+                // Re-roll ties until resolved
+                // Return winning playerId
             }
         } // Game — no render(), no bindControls(), no currentPlayer, no canvas
 
@@ -390,7 +408,7 @@
             const canvas = document.getElementById('gameCanvas');
             const gameObj = new Game();
             const ui = new GameUI(canvas, gameObj);
-            
+
         });
     </script>
 </body>
