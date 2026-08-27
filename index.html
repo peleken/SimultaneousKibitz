@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <!-- 
+https://sm-dev-tool-kit.localhost/php/test/kibitz/
 ## Game Rules
 ### Each player submits their turn simultaneously, then the game engine processes all turns and updates the board state.
 
@@ -25,16 +26,28 @@
     - Any existing babies on a tile will grow into civilians or soldiers based on the player's chosen ratio
     - New babies are generated on each tile based on the number of civilians present (1 baby per 2 civilians)
 
+### Execution FLow:
+    - Validate
+        - Validate all orders submitted
+    - Movement
+        - Move soldiers and civilians to target tiles
+    - Conflict Resolution
+        - Resolve conflicts and tile ownership
+    - Population Management
+        - Kill civilians
+        - Mature babies
+        - Generate new babies
+
 ## CODING NOTES
 ### Design Pattern:
     - Game class is pure model + rules, no DOM/canvas knowledge
     - GameUI class handles rendering and user interactions
 
 ### TO DO:
-    - Movement/Order system
-    - Multiplayer turn loop
+    - Movement/Order system for civilians (to owned tiles)
+    - Turn tracking and player switching
     - Conflict resolution system
-
+    - Multiplayer turn loop 
 ### Thoughts
     - I'd like this to potentially work as a board game, so 'fog of war' should maybe be optional and decoupled from core mechanics.
     - I'd like to have civilians represent a moral quandary for the players (more thought needed on this), for purposes of minimum viable product, enemy soldiers will kill unprotected civilians for now. 
@@ -47,27 +60,44 @@
     <title>Hex Population Prototype</title>
     <style>
         body { margin: 0; background-color: #1a1a1a; color: white; text-align: center; font-family: sans-serif; }
-        canvas { background-color: #0f172a; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
+        #uiContainer { display: flex; flex-direction: column; align-items: center; gap: 8px; margin: 10px; }
+        canvas { background-color: #0f172a; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.5); cursor: pointer; }
+        .panel { background: #2a2a2a; padding: 10px 20px; border-radius: 6px; display: flex; gap: 15px; align-items: center; }
+        button { background: #4f46e5; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-weight: bold; }
+        button:hover { background: #4338ca; }
+        button:disabled { background: #555; cursor: not-allowed; }
     </style>
 </head>
 <body>
     <h1>Hex Population Prototype</h1>
-    <div>
-        <label for="ratioSlider">Civilian Ratio (%): </label>
-        💂 Soldier
-        <input type="range" id="ratioSlider" min="0" max="100" step="25" value="50">
-        🧑‍🌾 Civilian
-        <span id="ratioValue">50%</span>
+    <div id="uiContainer">
+        <div class="panel">
+            <label for="ratioSlider">Civilian Ratio (%): </label>
+            💂 Soldier
+            <input type="range" id="ratioSlider" min="0" max="100" step="25" value="50">
+            🧑‍🌾 Civilian
+            <span id="ratioValue">50%</span>
+        </div>
+        
+        <div id="populationStatus" class="panel"></div>
+        
+        <div id="orderPanel" class="panel" style="display:none;">
+            <span id="orderInfo">Select Target Tile</span>
+            <input type="number" id="soldierCountInput" min="1" value="1" style="width: 50px;">
+            <button id="confirmOrderBtn">Send Soldiers</button>
+            <button id="cancelOrderBtn" style="background:#dc2626;">Cancel</button>
+        </div>
+
+        <canvas id="gameCanvas" width="800" height="600"></canvas>
+        
+        <div class="panel">
+            <button id="endTurnBtn">End Turn & Resolve</button>
+        </div>
     </div>
-    <div id="populationStatus"></div>
-    <canvas id="gameCanvas" width="800" height="600"></canvas>
-    <div>
-        <button id="endTurnBtn">End Turn</button>
-    </div>
+
     <script>
-        // Board Renderer, handled by GameUI
         class BoardRenderer {
-            constructor(canvas, tileSize = 45) {
+            constructor(canvas, tileSize = 65) {
                 this.canvas = canvas;
                 this.ctx = canvas.getContext('2d');
                 this.tileSize = tileSize;
@@ -77,23 +107,19 @@
             }
 
             axialToPixel(q, r) {
-                // Pointy-topped conversion formula
                 const x = this.tileSize * (Math.sqrt(3) * q + Math.sqrt(3) / 2 * r);
                 const y = this.tileSize * (3 / 2 * r);
                 return { x: this.originX + x, y: this.originY + y };
             }
 
-            getTileAtPixel(px, py) {
-                // Pointy-topped inverse: https://www.redblobgames.com/grids/hexagons/#pixel-to-hex
+            getTileAtPixel(px, py, board) {
                 const q = ((px - this.originX) * Math.sqrt(3)/3 - (py - this.originY) / 3) / this.tileSize;
                 const r = (py - this.originY) * 2/3 / this.tileSize;
-                // Round to nearest hex
                 const rounded = this.roundHex(q, r);
-                return this.hexBoard.hasTile(rounded.q, rounded.r) ? rounded : null;
+                return board.hasTile(rounded.q, rounded.r) ? rounded : null;
             }
 
             roundHex(q, r) {
-                // Cube rounding (see redblobgames)
                 const s = -q - r;
                 let rq = Math.round(q), rr = Math.round(r), rs = Math.round(s);
                 const q_diff = Math.abs(rq - q);
@@ -104,25 +130,56 @@
                 return { q: rq, r: rr };
             }
 
-            render(board, game, visibleKeys) {
+            render(board, game, visibleKeys, selectedKey, pendingOrders) {
                 this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-                this.renderTiles(board, game, visibleKeys);
+                this.renderTiles(board, game, visibleKeys, selectedKey);
+                this.renderOrders(pendingOrders);
                 this.renderOverlay(board, game, visibleKeys);
             }
 
-            renderTiles(board, game, visibleKeys) {
+            renderTiles(board, game, visibleKeys, selectedKey) {
                 for (const tile of board.tiles) {
                     const key = `${tile.q},${tile.r}`;
                     const { x, y } = this.axialToPixel(tile.q, tile.r);
+                    
                     if (!visibleKeys.has(key)) {
                         this.drawFog(x, y);
                         continue;
                     }
 
-                    // Get owner color or default to terrain
                     const pop = game.population.get(key);
                     const fillColor = pop?.ownerId ? game.getPlayerById(pop.ownerId)?.color || this.terrainColor : this.terrainColor;
-                    this.drawHex(x, y, fillColor);
+                    const isSelected = (key === selectedKey);
+                    
+                    this.drawHex(x, y, fillColor, isSelected);
+                }
+            }
+
+            renderOrders(pendingOrders) {
+                for (const order of pendingOrders) {
+                    const [fq, fr] = order.from.split(',').map(Number);
+                    const [tq, tr] = order.to.split(',').map(Number);
+                    const start = this.axialToPixel(fq, fr);
+                    const end = this.axialToPixel(tq, tr);
+
+                    // Draw movement vector arrow
+                    this.ctx.beginPath();
+                    this.ctx.moveTo(start.x, start.y);
+                    this.ctx.lineTo(end.x, end.y);
+                    this.ctx.strokeStyle = '#f59e0b';
+                    this.ctx.lineWidth = 4;
+                    this.ctx.stroke();
+
+                    // Movement order indicator tag
+                    this.ctx.fillStyle = '#f59e0b';
+                    this.ctx.beginPath();
+                    this.ctx.arc((start.x + end.x)/2, (start.y + end.y)/2, 10, 0, Math.PI * 2);
+                    this.ctx.fill();
+                    this.ctx.fillStyle = '#000';
+                    this.ctx.font = 'bold 10px sans-serif';
+                    this.ctx.textAlign = 'center';
+                    this.ctx.textBaseline = 'middle';
+                    this.ctx.fillText(`💂${order.amount}`, (start.x + end.x)/2, (start.y + end.y)/2);
                 }
             }
 
@@ -146,20 +203,23 @@
                     else this.ctx.lineTo(hx, hy);
                 }
                 this.ctx.closePath();
-                this.ctx.fillStyle = '#1a1a1a';
+                this.ctx.fillStyle = '#111827';
                 this.ctx.fill();
             }
 
             drawPopulation(x, y, pop) {
+                y -= this.tileSize/2; // Position above the tile
                 this.ctx.fillStyle = '#fff';
                 this.ctx.font = '12px sans-serif';
                 this.ctx.textAlign = 'center';
-                this.ctx.fillText(`🧑‍🌾:${pop.civilians} 💂:${pop.soldiers} 👶:${pop.babies}`, x, y + this.tileSize * 0.6);
+                this.ctx.textBaseline = 'alphabetic';
+                this.ctx.fillText(
+                    `🧑‍🌾:${pop.civilians}💂:${pop.soldiers}👶:${pop.babies}`
+                , x, y + this.tileSize * 0.5);
             }
 
-            drawHex(x, y, fillColor) {
+            drawHex(x, y, fillColor, isSelected = false) {
                 this.ctx.beginPath();
-                // Pointy-topped hexagon angles (starting at 30 deg / PI / 6)
                 for (let i = 0; i < 6; i++) {
                     const angle = (Math.PI / 3) * i + (Math.PI / 6);
                     const hx = x + this.tileSize * Math.cos(angle);
@@ -169,23 +229,25 @@
                 }
                 this.ctx.closePath();
 
-                // Fill with owner color or terrain
                 this.ctx.fillStyle = fillColor;
                 this.ctx.fill();
 
-                // Draw tile border
-                this.ctx.strokeStyle = '#ffffff';
-                this.ctx.lineWidth = 2;
+                this.ctx.strokeStyle = isSelected ? '#fbbf24' : '#ffffff';
+                this.ctx.lineWidth = isSelected ? 4 : 2;
                 this.ctx.stroke();
             }
-        } // BoardRenderer
+        }
 
-        // This is the UI class that handles rendering and user interactions
         class GameUI {
             constructor(canvas, game) {
+                this.canvas = canvas;
                 this.game = game;
                 this.boardRenderer = new BoardRenderer(canvas);
                 this.currentPlayer = game.players[0];
+                this.selectedKey = null;
+                this.targetKey = null;
+                this.pendingOrders = [];
+
                 this.bindControls();
                 this.render();
             }
@@ -197,30 +259,105 @@
                 slider.addEventListener('input', (e) => {
                     this.currentPlayer.civilianRatio = Number(e.target.value) / 100;
                     ratioValue.textContent = `${e.target.value}%`;
+                });
+
+                this.canvas.addEventListener('click', (e) => {
+                    const rect = this.canvas.getBoundingClientRect();
+                    const px = e.clientX - rect.left;
+                    const py = e.clientY - rect.top;
+
+                    const tile = this.boardRenderer.getTileAtPixel(px, py, this.game.hexBoard);
+                    if (tile) this.handleTileClick(tile.q, tile.r);
+                });
+
+                document.getElementById('confirmOrderBtn').addEventListener('click', () => {
+                    const countInput = document.getElementById('soldierCountInput');
+                    const amount = parseInt(countInput.value, 10);
+                    if (amount > 0 && this.selectedKey && this.targetKey) {
+                        this.pendingOrders.push(new Order("moveSoldiers", this.currentPlayer.id, this.selectedKey, this.targetKey, amount));
+                        this.selectedKey = null;
+                        this.targetKey = null;
+                        this.hideOrderPanel();
+                        this.render();
+                    }
+                });
+
+                document.getElementById('cancelOrderBtn').addEventListener('click', () => {
+                    this.selectedKey = null;
+                    this.targetKey = null;
+                    this.hideOrderPanel();
                     this.render();
                 });
 
                 document.getElementById('endTurnBtn').addEventListener('click', () => {
-                    console.log(`--- Processing turn for ${this.currentPlayer.name} (Ratio: ${this.currentPlayer.civilianRatio * 100}%) ---`);
-                    this.game.processTurn(this.currentPlayer);
-                    console.log("Population after turn:", Object.fromEntries(this.game.population));
+                    this.game.processTurn(this.currentPlayer, this.pendingOrders);
+                    this.pendingOrders = [];
+                    this.selectedKey = null;
+                    this.hideOrderPanel();
                     this.render();
                 });
             }
 
+            handleTileClick(q, r) {
+                const clickedKey = `${q},${r}`;
+                const visible = this.game.getVisibleTileKeys(this.currentPlayer);
+
+                if (!visible.has(clickedKey)) return;
+
+                const pop = this.game.population.get(clickedKey);
+
+                // If no origin tile is selected, select owned tile with soldiers
+                if (!this.selectedKey) {
+                    if (pop && pop.ownerId === this.currentPlayer.id && pop.soldiers > 0) {
+                        this.selectedKey = clickedKey;
+                    }
+                } else {
+                    // If origin is selected, check if clicked tile is an adjacent neighbor
+                    const [sq, sr] = this.selectedKey.split(',').map(Number);
+                    const neighbors = this.game.hexBoard.getNeighbors(sq, sr);
+                    const isNeighbor = neighbors.some(n => n.q === q && n.r === r);
+
+                    if (isNeighbor) {
+                        this.targetKey = clickedKey;
+                        this.showOrderPanel(pop);
+                    } else {
+                        // Change origin selection if clicking another owned tile
+                        if (pop && pop.ownerId === this.currentPlayer.id && pop.soldiers > 0) {
+                            this.selectedKey = clickedKey;
+                            this.hideOrderPanel();
+                        } else {
+                            this.selectedKey = null;
+                            this.hideOrderPanel();
+                        }
+                    }
+                }
+                this.render();
+            }
+
+            showOrderPanel() {
+                const [sq, sr] = this.selectedKey.split(',').map(Number);
+                const sourcePop = this.game.population.get(this.selectedKey);
+                const panel = document.getElementById('orderPanel');
+                const info = document.getElementById('orderInfo');
+                const input = document.getElementById('soldierCountInput');
+
+                info.textContent = `Move from (${this.selectedKey}) to (${this.targetKey})`;
+                input.max = sourcePop.soldiers;
+                input.value = Math.min(1, sourcePop.soldiers);
+                panel.style.display = 'flex';
+            }
+
+            hideOrderPanel() {
+                document.getElementById('orderPanel').style.display = 'none';
+            }
+
             render() {
                 const visible = this.game.getVisibleTileKeys(this.currentPlayer);
-                this.boardRenderer.render(this.game.hexBoard, this.game, visible);
+                this.boardRenderer.render(this.game.hexBoard, this.game, visible, this.selectedKey, this.pendingOrders);
 
-                const total = {
-                    civilians: 0,
-                    soldiers: 0,
-                    babies: 0
-                };
-
+                const total = { civilians: 0, soldiers: 0, babies: 0 };
                 for (const pop of this.game.population.values()) {
                     if (pop.ownerId !== this.currentPlayer.id) continue;
-
                     total.civilians += pop.civilians;
                     total.soldiers += pop.soldiers;
                     total.babies += pop.babies;
@@ -231,18 +368,15 @@
                     ` 💂 Soldiers: ${total.soldiers} | ` +
                     ` 👶 Babies: ${total.babies}`;
             }
-       }// GameUI
+        }
 
-        // A tile is currently just a coordinate on the board.
-        // Terrain and number tokens are intentionally omitted while the core
-        // population/territory mechanics are being balanced.
         class Tile {
             constructor(q, r, s) {
                 this.q = q;
                 this.r = r;
                 this.s = s;
             }
-        }// Tile
+        }
 
         class TilePopulation {
             constructor(ownerId = null, civilians = 0, soldiers = 0, babies = 0) {
@@ -253,7 +387,6 @@
             }
         }
 
-        // The board
         class HexBoard {
             constructor(radius) {
                 this.radius = radius;
@@ -267,12 +400,10 @@
                 for (let q = -radius; q <= radius; q++) {
                     const r1 = Math.max(-radius, -q - radius);
                     const r2 = Math.min(radius, -q + radius);
-
                     for (let r = r1; r <= r2; r++) {
                         tiles.push(new Tile(q, r, -q - r));
                     }
                 }
-
                 return tiles;
             }
 
@@ -286,20 +417,18 @@
             hasTile(q, r) {
                 return Math.max(Math.abs(q), Math.abs(r), Math.abs(-q - r)) <= this.radius;
             }
-        } // Hexboard
+        }
 
-        // Player class to represent each player in the game
         class Player {
             constructor(id, name, color, score) {
                 this.id = id;
                 this.name = name;
                 this.color = color;
                 this.score = score;
-                this.civilianRatio = 0.5; // Default ratio of babies to civilians
+                this.civilianRatio = 0.5;
             }
-        } // Player
+        }
 
-        // Contains a player order `new Order("moveSoldiers", 1, "0,0", "1,0", 3)`
         class Order {
             constructor(type, playerId, from, to, amount) {
                 this.type = type;
@@ -310,17 +439,22 @@
             }
         }
 
-        // Main Game class 
-        // Main Game class — pure model + rules, no DOM/canvas knowledge
-        // Only keeps track of game state and rules
+        // Placeholder for future conflict resolution logic
+        // Put in its own class so we can experiment with different mechanics without cluttering the Game class
+        class ConflictResolver {
+           constructor() {}
+           resolve(attackers, defender) { // attackers: [{playerId, amount}], defender: {playerId, amount}
+            }
+        }
+
         class Game {
             constructor() {
                 this.hexBoard = new HexBoard(2);
                 this.players = [
-                    new Player(1, "Player 1", "#ff5252", 0),  // Red
-                    new Player(2, "Player 2", "#4285f4", 0)   // Blue
+                    new Player(1, "Player 1", "#b91c1c", 0),  // Red
+                    new Player(2, "Player 2", "#1d4ed8", 0)   // Blue
                 ];
-                this.population = new Map(); // "q,r" -> TilePopulation
+                this.population = new Map();
                 this.setupStartingTiles();
             }
 
@@ -330,14 +464,7 @@
                 return this.players.find(p => p.id === id);
             }
 
-            getPopulation(q, r) {
-                return this.population.get(this.key(q, r));
-            }
-
             setupStartingTiles() {
-                // Fixed starting positions for the low-randomness prototype.
-                // Radius 2 gives us 19 tiles; these positions leave several
-                // neutral tiles between the players.
                 const startingPositions = [
                     { q: -2, r: 0 },
                     { q: 2, r: 0 }
@@ -346,10 +473,10 @@
                 this.players.forEach((player, i) => {
                     const position = startingPositions[i];
                     if (!position) return;
-
+                    // Give player starting soldiers to test orders
                     this.population.set(
                         this.key(position.q, position.r),
-                        new TilePopulation(player.id, 2, 0, 1)
+                        new TilePopulation(player.id, 2, 3, 1)
                     );
                 });
             }
@@ -367,48 +494,54 @@
                 return visible;
             }
 
-            processTurn(player) {
+            validateOrder(order, board, population) {
+                if (!this.getVisibleTileKeys(player).has(order.from)) return false;
+                // check adjacency, amount > 0, source has enough, etc.
+            }
+
+            processTurn(player, orders = []) {
+                // 1. Process movement orders
+                for (const order of orders) {
+                    if (order.type === "moveSoldiers") {
+                        const sourcePop = this.population.get(order.from);
+                        if (sourcePop && sourcePop.soldiers >= order.amount) {
+                            sourcePop.soldiers -= order.amount;
+                            
+                            let destPop = this.population.get(order.to);
+                            if (!destPop) {
+                                destPop = new TilePopulation(player.id, 0, 0, 0);
+                                this.population.set(order.to, destPop);
+                            }
+                            
+                            // Uncontested claim/move
+                            if (destPop.ownerId === null || destPop.ownerId === player.id) {
+                                destPop.ownerId = player.id;
+                                destPop.soldiers += order.amount;
+                            }
+                        }
+                    }
+                }
+
+                // 2. Population growth & baby maturation
                 for (const [key, pop] of this.population) {
                     if (pop.ownerId !== player.id) continue;
 
-                    console.log(`Processing tile ${key}:`, { ...pop });
-
-                    // 1. Existing babies mature.
                     const babiesToMature = pop.babies;
                     const newCivilians = Math.floor(babiesToMature * player.civilianRatio);
                     const newSoldiers = babiesToMature - newCivilians;
-
-                    // FIX: Calculate new babies BEFORE adding matured civilians/soldiers
                     const newBabies = Math.floor(pop.civilians / 2);
 
                     pop.civilians += newCivilians;
                     pop.soldiers += newSoldiers;
                     pop.babies = newBabies;
-
-                    console.log(`  After maturation: +${newCivilians}🧑‍🌾 +${newSoldiers}💂 → ${newBabies}👶`);
                 }
             }
+        }
 
-            resolveConflict(tileKey, attackers) {
-                // attackers: Map<playerId, soldierCount>
-                const pop = this.population.get(tileKey);
-                const defenderId = pop?.ownerId;
-                const defenderCount = pop?.soldiers || 0;
-
-                // If tile is owned, defender has advantage
-                // If unowned, largest army has advantage
-                // Use dice rolls (e.g., 1d6 per soldier, highest total wins)
-                // Re-roll ties until resolved
-                // Return winning playerId
-            }
-        } // Game — no render(), no bindControls(), no currentPlayer, no canvas
-
-        // Initialize on DOM load
-       window.addEventListener('DOMContentLoaded', () => {
+        window.addEventListener('DOMContentLoaded', () => {
             const canvas = document.getElementById('gameCanvas');
             const gameObj = new Game();
-            const ui = new GameUI(canvas, gameObj);
-
+            new GameUI(canvas, gameObj);
         });
     </script>
 </body>
