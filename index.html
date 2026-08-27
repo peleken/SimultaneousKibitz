@@ -30,27 +30,37 @@
     - Game class is pure model + rules, no DOM/canvas knowledge
     - GameUI class handles rendering and user interactions
 
+### TO DO:
+    - Movement/Order system
+    - Multiplayer turn loop
+        - Need "Hot Seat" method, should implement early for local testing
+    - Conflict resolution system
+
 ### Thoughts
     - I'd like this to potentially work as a board game, so 'fog of war' should maybe be optional and decoupled from core mechanics.
     - I'd like to have civilians represent a moral quandary for the players (more thought needed on this), for purposes of minimum viable product, enemy soldiers will kill unprotected civilians for now. 
+        - Maybe scoring could be based on civilian population and a penalty for civilians killed.
 -->
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Hexagonal Game Board Setup</title>
+    <title>Hex Population Prototype</title>
     <style>
         body { margin: 0; background-color: #1a1a1a; color: white; text-align: center; font-family: sans-serif; }
         canvas { background-color: #0f172a; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
     </style>
 </head>
 <body>
-    <h1>Hex Board Init</h1>
+    <h1>Hex Population Prototype</h1>
     <div>
         <label for="ratioSlider">Civilian Ratio (%): </label>
-        <input type="range" id="ratioSlider" min="0" max="100" value="50">
+        💂 Soldier
+        <input type="range" id="ratioSlider" min="0" max="100" step="25" value="50">
+        🧑‍🌾 Civilian
         <span id="ratioValue">50%</span>
     </div>
+    <div id="populationStatus"></div>
     <canvas id="gameCanvas" width="800" height="600"></canvas>
     <div>
         <button id="endTurnBtn">End Turn</button>
@@ -64,11 +74,7 @@
                 this.tileSize = tileSize;
                 this.originX = canvas.width / 2;
                 this.originY = canvas.height / 2;
-                this.terrainColors = {
-                    land: '#2e7d32',      // Green
-                    water: '#0288d1',     // Blue
-                    mountains: '#78909c'  // Slate Gray
-                };
+                this.terrainColor = '#2e7d32';
             }
 
             axialToPixel(q, r) {
@@ -76,6 +82,28 @@
                 const x = this.tileSize * (Math.sqrt(3) * q + Math.sqrt(3) / 2 * r);
                 const y = this.tileSize * (3 / 2 * r);
                 return { x: this.originX + x, y: this.originY + y };
+            }
+            
+            // In BoardRenderer
+            getTileAtPixel(px, py) {
+                // Pointy-topped inverse: https://www.redblobgames.com/grids/hexagons/#pixel-to-hex
+                const q = ((px - this.originX) * Math.sqrt(3)/3 - (py - this.originY) / 3) / this.tileSize;
+                const r = (py - this.originY) * 2/3 / this.tileSize;
+                // Round to nearest hex
+                const rounded = this.roundHex(q, r);
+                return this.hexBoard.hasTile(rounded.q, rounded.r) ? rounded : null;
+            }
+
+            roundHex(q, r) {
+                // Cube rounding (see redblobgames)
+                const s = -q - r;
+                let rq = Math.round(q), rr = Math.round(r), rs = Math.round(s);
+                const q_diff = Math.abs(rq - q);
+                const r_diff = Math.abs(rr - r);
+                const s_diff = Math.abs(rs - s);
+                if (q_diff > r_diff && q_diff > s_diff) rq = -rr - rs;
+                else if (r_diff > s_diff) rr = -rq - rs;
+                return { q: rq, r: rr };
             }
 
             render(board, game, visibleKeys) {
@@ -92,8 +120,7 @@
                         this.drawFog(x, y);
                         continue;
                     }
-                    this.drawHex(x, y, this.terrainColors[tile.terrain] || '#cccccc');
-                    if (tile.terrain !== 'water') this.drawNumberToken(x, y, tile.numberToken);
+                    this.drawHex(x, y, this.terrainColor);
                 }
             }
 
@@ -125,7 +152,7 @@
                 this.ctx.fillStyle = '#fff';
                 this.ctx.font = '12px sans-serif';
                 this.ctx.textAlign = 'center';
-                this.ctx.fillText(`C:${pop.civilians} S:${pop.soldiers}`, x, y + this.tileSize * 0.6);
+                this.ctx.fillText(`🧑‍🌾:${pop.civilians} 💂:${pop.soldiers} 👶:${pop.babies}`, x, y + this.tileSize * 0.6);
             }
 
             drawHex(x, y, fillColor) {
@@ -149,25 +176,7 @@
                 this.ctx.lineWidth = 2;
                 this.ctx.stroke();
             }
-            // These aren't needed, but I like the look of them and may implement for population
-            // drawNumberToken(x, y, num) {
-            //     // Circular background token
-            //     this.ctx.beginPath();
-            //     this.ctx.arc(x, y, this.tileSize * 0.35, 0, 2 * Math.PI);
-            //     this.ctx.fillStyle = '#fff8e7';
-            //     this.ctx.fill();
-            //     this.ctx.strokeStyle = '#333333';
-            //     this.ctx.lineWidth = 1;
-            //     this.ctx.stroke();
-
-            //     // Token text
-            //     this.ctx.fillStyle = (num === 6 || num === 8) ? '#d32f2f' : '#111111'; // Red highlight for high frequency numbers
-            //     this.ctx.font = 'bold 14px sans-serif';
-            //     this.ctx.textAlign = 'center';
-            //     this.ctx.textBaseline = 'middle';
-            //     this.ctx.fillText(num.toString(), x, y);
-            // }
-        }// BoardRenderer
+        } // BoardRenderer
 
         // This is the UI class that handles rendering and user interactions
         class GameUI {
@@ -181,30 +190,54 @@
 
             bindControls() {
                 const slider = document.getElementById('ratioSlider');
+                const ratioValue = document.getElementById('ratioValue');
+
                 slider.addEventListener('input', (e) => {
                     this.currentPlayer.civilianRatio = Number(e.target.value) / 100;
+                    ratioValue.textContent = `${e.target.value}%`;
+                    this.render();
                 });
 
                 document.getElementById('endTurnBtn').addEventListener('click', () => {
                     this.game.processTurn(this.currentPlayer);
                     this.render();
+                    console.log("Game Object:", this.game);
                 });
             }
 
             render() {
                 const visible = this.game.getVisibleTileKeys(this.currentPlayer);
                 this.boardRenderer.render(this.game.hexBoard, this.game, visible);
+
+                const total = {
+                    civilians: 0,
+                    soldiers: 0,
+                    babies: 0
+                };
+
+                for (const pop of this.game.population.values()) {
+                    if (pop.ownerId !== this.currentPlayer.id) continue;
+
+                    total.civilians += pop.civilians;
+                    total.soldiers += pop.soldiers;
+                    total.babies += pop.babies;
+                }
+
+                document.getElementById('populationStatus').textContent =
+                    `Population — 🧑‍🌾 Civilians: ${total.civilians} | ` +
+                    ` 💂 Soldiers: ${total.soldiers} | ` +
+                    ` 👶 Babies: ${total.babies}`;
             }
         }// GameUI
 
-        // Tiles
+        // A tile is currently just a coordinate on the board.
+        // Terrain and number tokens are intentionally omitted while the core
+        // population/territory mechanics are being balanced.
         class Tile {
-            constructor(q, r, s, terrain, numberToken) {
+            constructor(q, r, s) {
                 this.q = q;
                 this.r = r;
                 this.s = s;
-                this.terrain = terrain;
-                this.numberToken = numberToken;
             }
         }// Tile
 
@@ -227,17 +260,16 @@
             createHexBoard() {
                 const radius = this.radius;
                 const tiles = [];
-                const terrainTypes = ['land', 'water', 'mountains'];
 
                 for (let q = -radius; q <= radius; q++) {
                     const r1 = Math.max(-radius, -q - radius);
                     const r2 = Math.min(radius, -q + radius);
+
                     for (let r = r1; r <= r2; r++) {
-                        const terrain = terrainTypes[Math.floor(Math.random() * terrainTypes.length)];
-                        const token = Math.floor(Math.random() * 11) + 2;
-                        tiles.push(new Tile(q, r, -q - r, terrain, token));
+                        tiles.push(new Tile(q, r, -q - r));
                     }
                 }
+
                 return tiles;
             }
 
@@ -296,12 +328,22 @@
             }
 
             setupStartingTiles() {
-                // naive placement: give each player a distinct starting tile
-                const landTiles = this.hexBoard.tiles.filter(t => t.terrain === 'land');
+                // Fixed starting positions for the low-randomness prototype.
+                // Radius 2 gives us 19 tiles; these positions leave several
+                // neutral tiles between the players.
+                const startingPositions = [
+                    { q: -2, r: 0 },
+                    { q: 2, r: 0 }
+                ];
+
                 this.players.forEach((player, i) => {
-                    const tile = landTiles[i];
-                    if (!tile) return;
-                    this.population.set(this.key(tile.q, tile.r), new TilePopulation(player.id, 2, 0));
+                    const position = startingPositions[i];
+                    if (!position) return;
+
+                    this.population.set(
+                        this.key(position.q, position.r),
+                        new TilePopulation(player.id, 2, 0, 1)
+                    );
                 });
             }
 
@@ -321,12 +363,24 @@
             processTurn(player) {
                 for (const [key, pop] of this.population) {
                     if (pop.ownerId !== player.id) continue;
-                    const babies = Math.floor(pop.civilians / 2);
-                    if (babies === 0) continue;
-                    const newCivilians = Math.round(babies * player.civilianRatio);
-                    const newSoldiers = babies - newCivilians;
+
+                    // 1. Existing babies mature.
+                    // For the first deterministic prototype, the ratio is
+                    // applied to the whole number of babies using floor().
+                    const babiesToMature = pop.babies;
+
+                    const newCivilians = Math.floor(
+                        babiesToMature * player.civilianRatio
+                    );
+
+                    const newSoldiers = babiesToMature - newCivilians;
+
                     pop.civilians += newCivilians;
                     pop.soldiers += newSoldiers;
+
+                    // 2. Generate a NEW generation of babies.
+                    // These babies remain babies until the next turn.
+                    pop.babies = Math.floor(pop.civilians / 2);
                 }
             }
         } // Game — no render(), no bindControls(), no currentPlayer, no canvas
@@ -336,7 +390,7 @@
             const canvas = document.getElementById('gameCanvas');
             const gameObj = new Game();
             const ui = new GameUI(canvas, gameObj);
-            console.log("Game Object:", gameObj);
+            
         });
     </script>
 </body>
