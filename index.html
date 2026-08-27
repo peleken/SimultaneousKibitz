@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<!-- 
+## Game Rules
+### Each player submits their turn simultaneously, then the game engine processes all turns and updates the board state.
+
+### Starting Setup:
+    - Each player starts with 1 tile
+    - The player can see the tile they own and all adjacent tiles
+    - On the starting tile, each player has 2 civilians and 1 baby
+    - The player can choose (via slider) what percentage of babies become civilians or soldiers
+
+### Player Turn:
+    - Players can adjust their civilian/soldier ratio 
+    - Players can attempt to claim an unowned adjacent tile by moving one or more soldiers to it.
+    - Players can move civilians to owned tiles to increase their population.
+
+### Game Engine:
+    - Once all players have submitted their turns, the game engine processes the moves and updates the board state
+    - Any tiles with multiple players attempting to claim them will be resolved via a conflict resolution mechanic (currently dice rolls)
+    - Conflicts are resolved similar to Risk (for now, 6 sided die rolls)
+        - If a player owns the tile, they have defender advantage 
+        - If the tile is unowned, the larger army has advantage
+        - Ties are re-rolled until a winner is determined
+    - There can only be one owner per tile, and the winner of the conflict takes ownership of the tile 
+    - Any existing babies on a tile will grow into civilians or soldiers based on the player's chosen ratio
+    - New babies are generated on each tile based on the number of civilians present (1 baby per 2 civilians)
+
+## CODING NOTES
+### Design Pattern:
+    - Game class is pure model + rules, no DOM/canvas knowledge
+    - GameUI class handles rendering and user interactions
+
+### Thoughts
+    - I'd like this to potentially work as a board game, so 'fog of war' should maybe be optional and decoupled from core mechanics.
+    - I'd like to have civilians represent a moral quandary for the players (more thought needed on this), for purposes of minimum viable product, enemy soldiers will kill unprotected civilians for now. 
+-->
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hexagonal Game Board Setup</title>
+    <style>
+        body { margin: 0; background-color: #1a1a1a; color: white; text-align: center; font-family: sans-serif; }
+        canvas { background-color: #0f172a; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
+    </style>
+</head>
+<body>
+    <h1>Hex Board Init</h1>
+    <div>
+        <label for="ratioSlider">Civilian Ratio (%): </label>
+        <input type="range" id="ratioSlider" min="0" max="100" value="50">
+        <span id="ratioValue">50%</span>
+    </div>
+    <canvas id="gameCanvas" width="800" height="600"></canvas>
+    <div>
+        <button id="endTurnBtn">End Turn</button>
+    </div>
+    <script>
+        // Board Renderer, handled by GameUI
+        class BoardRenderer {
+            constructor(canvas, tileSize = 45) {
+                this.canvas = canvas;
+                this.ctx = canvas.getContext('2d');
+                this.tileSize = tileSize;
+                this.originX = canvas.width / 2;
+                this.originY = canvas.height / 2;
+                this.terrainColors = {
+                    land: '#2e7d32',      // Green
+                    water: '#0288d1',     // Blue
+                    mountains: '#78909c'  // Slate Gray
+                };
+            }
+
+            axialToPixel(q, r) {
+                // Pointy-topped conversion formula
+                const x = this.tileSize * (Math.sqrt(3) * q + Math.sqrt(3) / 2 * r);
+                const y = this.tileSize * (3 / 2 * r);
+                return { x: this.originX + x, y: this.originY + y };
+            }
+
+            render(board, game, visibleKeys) {
+                this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+                this.renderTiles(board, visibleKeys);
+                this.renderOverlay(board, game, visibleKeys);
+            }
+
+            renderTiles(board, visibleKeys) {
+                for (const tile of board.tiles) {
+                    const key = `${tile.q},${tile.r}`;
+                    const { x, y } = this.axialToPixel(tile.q, tile.r);
+                    if (!visibleKeys.has(key)) {
+                        this.drawFog(x, y);
+                        continue;
+                    }
+                    this.drawHex(x, y, this.terrainColors[tile.terrain] || '#cccccc');
+                    if (tile.terrain !== 'water') this.drawNumberToken(x, y, tile.numberToken);
+                }
+            }
+
+            renderOverlay(board, game, visibleKeys) {
+                for (const key of visibleKeys) {
+                    const pop = game.population.get(key);
+                    if (!pop) continue;
+                    const [q, r] = key.split(',').map(Number);
+                    const { x, y } = this.axialToPixel(q, r);
+                    this.drawPopulation(x, y, pop);
+                }
+            }
+
+            drawFog(x, y) {
+                this.ctx.beginPath();
+                for (let i = 0; i < 6; i++) {
+                    const angle = (Math.PI / 3) * i + (Math.PI / 6);
+                    const hx = x + this.tileSize * Math.cos(angle);
+                    const hy = y + this.tileSize * Math.sin(angle);
+                    if (i === 0) this.ctx.moveTo(hx, hy);
+                    else this.ctx.lineTo(hx, hy);
+                }
+                this.ctx.closePath();
+                this.ctx.fillStyle = '#1a1a1a';
+                this.ctx.fill();
+            }
+
+            drawPopulation(x, y, pop) {
+                this.ctx.fillStyle = '#fff';
+                this.ctx.font = '12px sans-serif';
+                this.ctx.textAlign = 'center';
+                this.ctx.fillText(`C:${pop.civilians} S:${pop.soldiers}`, x, y + this.tileSize * 0.6);
+            }
+
+            drawHex(x, y, fillColor) {
+                this.ctx.beginPath();
+                // Pointy-topped hexagon angles (starting at 30 deg / PI / 6)
+                for (let i = 0; i < 6; i++) {
+                    const angle = (Math.PI / 3) * i + (Math.PI / 6);
+                    const hx = x + this.tileSize * Math.cos(angle);
+                    const hy = y + this.tileSize * Math.sin(angle);
+                    if (i === 0) this.ctx.moveTo(hx, hy);
+                    else this.ctx.lineTo(hx, hy);
+                }
+                this.ctx.closePath();
+
+                // Fill terrain color
+                this.ctx.fillStyle = fillColor;
+                this.ctx.fill();
+
+                // Draw tile border
+                this.ctx.strokeStyle = '#ffffff';
+                this.ctx.lineWidth = 2;
+                this.ctx.stroke();
+            }
+            // These aren't needed, but I like the look of them and may implement for population
+            // drawNumberToken(x, y, num) {
+            //     // Circular background token
+            //     this.ctx.beginPath();
+            //     this.ctx.arc(x, y, this.tileSize * 0.35, 0, 2 * Math.PI);
+            //     this.ctx.fillStyle = '#fff8e7';
+            //     this.ctx.fill();
+            //     this.ctx.strokeStyle = '#333333';
+            //     this.ctx.lineWidth = 1;
+            //     this.ctx.stroke();
+
+            //     // Token text
+            //     this.ctx.fillStyle = (num === 6 || num === 8) ? '#d32f2f' : '#111111'; // Red highlight for high frequency numbers
+            //     this.ctx.font = 'bold 14px sans-serif';
+            //     this.ctx.textAlign = 'center';
+            //     this.ctx.textBaseline = 'middle';
+            //     this.ctx.fillText(num.toString(), x, y);
+            // }
+        }// BoardRenderer
+
+        // This is the UI class that handles rendering and user interactions
+        class GameUI {
+            constructor(canvas, game) {
+                this.game = game;
+                this.boardRenderer = new BoardRenderer(canvas);
+                this.currentPlayer = game.players[0];
+                this.bindControls();
+                this.render();
+            }
+
+            bindControls() {
+                const slider = document.getElementById('ratioSlider');
+                slider.addEventListener('input', (e) => {
+                    this.currentPlayer.civilianRatio = Number(e.target.value) / 100;
+                });
+
+                document.getElementById('endTurnBtn').addEventListener('click', () => {
+                    this.game.processTurn(this.currentPlayer);
+                    this.render();
+                });
+            }
+
+            render() {
+                const visible = this.game.getVisibleTileKeys(this.currentPlayer);
+                this.boardRenderer.render(this.game.hexBoard, this.game, visible);
+            }
+        }// GameUI
+
+        // Tiles
+        class Tile {
+            constructor(q, r, s, terrain, numberToken) {
+                this.q = q;
+                this.r = r;
+                this.s = s;
+                this.terrain = terrain;
+                this.numberToken = numberToken;
+            }
+        }// Tile
+
+        class TilePopulation {
+            constructor(ownerId = null, civilians = 0, soldiers = 0, babies = 0) {
+                this.ownerId = ownerId;
+                this.civilians = civilians;
+                this.soldiers = soldiers;
+                this.babies = babies;
+            }
+        }
+
+        // The board
+        class HexBoard {
+            constructor(radius) {
+                this.radius = radius;
+                this.tiles = this.createHexBoard();
+            }
+
+            createHexBoard() {
+                const radius = this.radius;
+                const tiles = [];
+                const terrainTypes = ['land', 'water', 'mountains'];
+
+                for (let q = -radius; q <= radius; q++) {
+                    const r1 = Math.max(-radius, -q - radius);
+                    const r2 = Math.min(radius, -q + radius);
+                    for (let r = r1; r <= r2; r++) {
+                        const terrain = terrainTypes[Math.floor(Math.random() * terrainTypes.length)];
+                        const token = Math.floor(Math.random() * 11) + 2;
+                        tiles.push(new Tile(q, r, -q - r, terrain, token));
+                    }
+                }
+                return tiles;
+            }
+
+            getNeighbors(q, r) {
+                const dirs = [[1,0],[1,-1],[0,-1],[-1,0],[-1,1],[0,1]];
+                return dirs
+                    .map(([dq, dr]) => ({ q: q + dq, r: r + dr }))
+                    .filter(({q, r}) => this.hasTile(q, r));
+            }
+
+            hasTile(q, r) {
+                return Math.max(Math.abs(q), Math.abs(r), Math.abs(-q - r)) <= this.radius;
+            }
+        } // Hexboard
+
+        // Player class to represent each player in the game
+        class Player {
+            constructor(id, name, color, score) {
+                this.id = id;
+                this.name = name;
+                this.color = color;
+                this.score = score;
+                this.civilianRatio = 0.5; // Default ratio of babies to civilians
+            }
+        } // Player
+
+        // Contains a player order `new Order("moveSoldiers", 1, "0,0", "1,0", 3)`
+        class Order {
+            constructor(type, playerId, from, to, amount) {
+                this.type = type;
+                this.playerId = playerId;
+                this.from = from;
+                this.to = to;
+                this.amount = amount;
+            }
+        }
+
+        // Main Game class 
+        // Main Game class — pure model + rules, no DOM/canvas knowledge
+        // Only keeps track of game state and rules
+        class Game {
+            constructor() {
+                this.hexBoard = new HexBoard(2);
+                this.players = [
+                    new Player(1, "Player 1", "red", 0),
+                    new Player(2, "Player 2", "blue", 0)
+                ];
+                this.population = new Map(); // "q,r" -> TilePopulation
+                this.setupStartingTiles();
+            }
+
+            key(q, r) { return `${q},${r}`; }
+
+            getPopulation(q, r) {
+                return this.population.get(this.key(q, r));
+            }
+
+            setupStartingTiles() {
+                // naive placement: give each player a distinct starting tile
+                const landTiles = this.hexBoard.tiles.filter(t => t.terrain === 'land');
+                this.players.forEach((player, i) => {
+                    const tile = landTiles[i];
+                    if (!tile) return;
+                    this.population.set(this.key(tile.q, tile.r), new TilePopulation(player.id, 2, 0));
+                });
+            }
+
+            getVisibleTileKeys(player) {
+                const visible = new Set();
+                for (const [key, pop] of this.population) {
+                    if (pop.ownerId !== player.id) continue;
+                    const [q, r] = key.split(',').map(Number);
+                    visible.add(key);
+                    for (const n of this.hexBoard.getNeighbors(q, r)) {
+                        visible.add(this.key(n.q, n.r));
+                    }
+                }
+                return visible;
+            }
+
+            processTurn(player) {
+                for (const [key, pop] of this.population) {
+                    if (pop.ownerId !== player.id) continue;
+                    const babies = Math.floor(pop.civilians / 2);
+                    if (babies === 0) continue;
+                    const newCivilians = Math.round(babies * player.civilianRatio);
+                    const newSoldiers = babies - newCivilians;
+                    pop.civilians += newCivilians;
+                    pop.soldiers += newSoldiers;
+                }
+            }
+        } // Game — no render(), no bindControls(), no currentPlayer, no canvas
+
+        // Initialize on DOM load
+       window.addEventListener('DOMContentLoaded', () => {
+            const canvas = document.getElementById('gameCanvas');
+            const gameObj = new Game();
+            const ui = new GameUI(canvas, gameObj);
+            console.log("Game Object:", gameObj);
+        });
+    </script>
+</body>
+</html>
