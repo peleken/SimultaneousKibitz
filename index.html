@@ -44,23 +44,21 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
     - Game class is pure model + rules, no DOM/canvas knowledge
     - GameUI class handles rendering and user interactions
 
-### CHANGES THIS PASS:
-    - Turns are now collected per-player and resolved together in Game.resolveTurn(),
-      instead of each player's End Turn immediately mutating shared state.
-    - ConflictResolver.resolve() implemented: dice rolls, defender/size advantage, reroll on ties.
-    - Game.validateOrder() is now actually called (was dead code with an out-of-scope
-      reference to `player` before).
-    - GameUI now cycles through players collecting orders, then calls resolveTurn once
-      the last player submits.
+### KNOWN BUGS:
+    - Moving soldiers from a source tile doesn't decrease the sources available soldier count, (so user can submit full soldier population to multiple tiles)
 
 ### TO DO:
     - Movement/Order system for civilians (to owned tiles)
     - Combat attrition (currently winner keeps full army, no losses modeled)
     - Multiplayer turn loop (currently hotseat/local only)
+
 ### Thoughts
     - I'd like this to potentially work as a board game, so 'fog of war' should maybe be optional and decoupled from core mechanics.
     - I'd like to have civilians represent a moral quandary for the players (more thought needed on this), for purposes of minimum viable product, enemy soldiers will kill unprotected civilians for now.
         - Maybe scoring could be based on civilian population and a penalty for civilians killed.
+    - What happens if there's a tile conflict between 3 or more players?
+    - Eventually, the game object and turn resolver logic will live server side (probably php/mysql)
+    - The UI will just need to render current game state (from that users perspective) and allow order submissions. 
 -->
 <html lang="en">
 <head>
@@ -79,7 +77,7 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
     </style>
 </head>
 <body>
-    <h1>Hex Population Prototype</h1>
+    <h1>Simultanious Kibitz -v 0.1 (alpha)</h1>
     <div id="uiContainer">
         <div id="turnIndicator" class="panel"></div>
 
@@ -378,7 +376,7 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
 
                 info.textContent = `Move from (${this.selectedKey}) to (${this.targetKey})`;
                 input.max = sourcePop.soldiers;
-                input.value = Math.min(1, sourcePop.soldiers);
+                input.value = sourcePop.soldiers > 0 ? sourcePop.soldiers : 1;
                 panel.style.display = 'flex';
             }
 
@@ -490,15 +488,15 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
         // Dice-based conflict resolution, similar to Risk.
         // Kept as its own class so the mechanic can be swapped out without touching Game.
         class ConflictResolver {
-            rollDie() {
-                return Math.floor(Math.random() * 6) + 1;
+            rollDie(max = 6) {
+                return Math.floor(Math.random() * max) + 1;
             }
 
             // One battle between two sides: { playerId, amount }.
             // defenderPlayerId (or null) tells us who gets the "defender" bonus;
             // if neither side is the defender, the larger army gets the bonus instead.
             // Ties are rerolled until there's a winner.
-            rollBattle(sideA, sideB, defenderPlayerId) {
+            rollBattle_old(sideA, sideB, defenderPlayerId) {
                 while (true) {
                     let rollA = this.rollDie();
                     let rollB = this.rollDie();
@@ -513,6 +511,37 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
                     if (rollA === rollB) continue; // re-roll ties per the rules doc
                     return rollA > rollB ? sideA : sideB;
                 }
+            }
+
+            // roll until one side's army = 0
+            // could probably be refactored
+            rollBattle(sideA, sideB, defenderPlayerId) {
+                do {
+                    let rollA = this.rollDie();
+                    let rollB = this.rollDie();
+                    let winner = "tie";
+                    winner = (rollA > rollB)? "A" : winner;
+                    winner = (rollA < rollB)? "B" : winner;
+                    if(winner == "tie"){// we're still tied, check defender advantage
+                        winner = (defenderPlayerId === sideA.playerId)? "A" : winner;
+                        winner = (defenderPlayerId === sideB.playerId)? "B" : winner;
+                    }  
+                    if(winner == "tie"){// we're still tied, check larger army advantage
+                        winner = (sideA.amount > sideB.amount )? "A" : winner;
+                        winner = (sideA.amount < sideB.amount )? "B" : winner;
+                    }
+                    if(winner == "tie"){// we're still tied, coin flip
+                        winner = (this.rollDie(2) >= 2)? "A" : "B";
+                    }
+
+                    if (winner == "A") { 
+                        -- sideB.amount;
+                    } else {
+                        -- sideA.amount;
+                    }
+                    console.log(`Rolls A: ${rollA} B: ${rollB} - ${winner} Wins - Remaining Amount A: ${sideA.amount} B: ${sideB.amount}`);
+                } while (sideA.amount > 0 && sideB.amount > 0)
+                return sideA.amount > 0 ? sideA : sideB;
             }
 
             // attackers: [{ playerId, amount }] — everyone who moved soldiers INTO this tile
