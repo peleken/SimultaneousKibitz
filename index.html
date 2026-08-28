@@ -28,14 +28,13 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
     - New babies are generated on each tile based on the number of civilians present (1 baby per 2 civilians)
 
 ### Execution Flow:
-    - Two Phase approach 
-        - Collect 
-            - Get all the players intentions 
-        - Resolve
-            - Movement
-            - Conflict
-            - Population
-
+    - Two Phase approach                                                                      
+        - Collect                                                                             
+            - Get all the players intentions                                                  
+        - Resolve                                                                             
+            - Movement                                                                        
+            - Conflict                                                                        
+            - Population     
     - Validate
         - Validate all orders submitted
     - Movement
@@ -49,15 +48,12 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
 
 ## CODING NOTES
 ### Design Pattern:
-    - Game class is pure model + rules, no DOM/canvas knowledge (Game should be playable without a browser, or human friendly UI. Will eventually move game logic, turn resolution to server side)
+    - Game class is pure model + rules, no DOM/canvas knowledge (will eventually move game logic, turn resolution to server side)
     - GameUI class handles rendering and user interactions
 
 ### KNOWN BUGS: 
 
 ### TO DO:
-    - Introduce a turn class to track players submissions
-    - Decouple Game state (pure data), with game (Game logic)
-    - Turn validation logic on back end (is this a legal order?)
     - Multiplayer turn loop (currently hotseat/local only)
     - Add win condition (opponents have no more players on board)
         - Could potentially add alternative conditions in the future
@@ -100,7 +96,7 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
     </style>
 </head>
 <body>
-    <h1>Simultaneous Kibitz - v 0.2 (alpha)</h1>
+    <h1>Simultaneous Kibitz - v 0.3 (turn simulator alpha)</h1>
     <div id="uiContainer">
         <div id="turnIndicator" class="panel"></div>
 
@@ -133,6 +129,14 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
 
         <h3>Game Log</h3>
         <div id="gameLog"></div>
+
+        <div class="panel" style="width:80%; box-sizing:border-box;">
+            <button id="showStateBtn" type="button">Show Game State JSON</button>
+            <button id="simulateEmptyBtn" type="button">Simulate Empty Turn</button>
+        </div>
+        <pre id="stateOutput" style="width:80%; max-height:250px; overflow:auto; box-sizing:border-box;
+            background:#111827; color:#d1d5db; padding:10px; border-radius:6px; text-align:left;
+            font-size:11px; white-space:pre-wrap;"></pre>
     </div>
 
     <script>
@@ -297,6 +301,97 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
             }
         }
 
+        /*
+         * GameEngine is the turn-simulation boundary.
+         *
+         * It deliberately has no DOM/canvas knowledge. A caller gives it
+         * a complete set of orders for a turn; it validates and resolves
+         * them against the game state.
+         *
+         * The existing Game remains the rules implementation for now.
+         * This facade makes the intended architecture explicit without
+         * requiring a risky rewrite of the working prototype.
+         */
+        class GameEngine {
+            constructor(game) {
+                this.game = game;
+            }
+
+            simulateTurn(ordersByPlayerId) {
+                const normalizedOrders = {};
+
+                for (const player of this.game.players) {
+                    const orders = ordersByPlayerId[player.id] || [];
+
+                    if (!Array.isArray(orders)) {
+                        throw new Error(`Orders for ${player.name} must be an array.`);
+                    }
+
+                    normalizedOrders[player.id] = orders;
+                }
+
+                this.game.resolveTurn(normalizedOrders);
+
+                return this.getStateSnapshot();
+            }
+
+            getStateSnapshot() {
+                return this.game.state.serialize();
+            }
+
+            validateOrders(ordersByPlayerId) {
+                const errors = [];
+
+                for (const player of this.game.players) {
+                    const orders = ordersByPlayerId[player.id] || [];
+                    const committed = new Map();
+
+                    for (const order of orders) {
+                        if (order.playerId !== player.id) {
+                            errors.push(`${player.name}: order contains the wrong player ID.`);
+                            continue;
+                        }
+
+                        if (!this.game.validateOrder(order, player.id)) {
+                            errors.push(
+                                `${player.name}: invalid ${order.type} from ${order.from} ` +
+                                `to ${order.to} (${order.amount}).`
+                            );
+                            continue;
+                        }
+
+                        const key = `${order.from}:${order.type}`;
+                        committed.set(key, (committed.get(key) || 0) + order.amount);
+                    }
+
+                    // Validate the submitted collection, not merely each
+                    // order individually. This prevents a client from
+                    // spending the same units in multiple orders.
+                    for (const [commitKey, amount] of committed) {
+                        const [from, type] = commitKey.split(":");
+                        const pop = this.game.population.get(from);
+                        if (!pop) continue;
+
+                        const available = type === "moveSoldiers"
+                            ? pop.soldiers
+                            : pop.civilians;
+
+                        if (amount > available) {
+                            errors.push(
+                                `${player.name}: submitted ${amount} units from ${from}, ` +
+                                `but only ${available} are available.`
+                            );
+                        }
+                    }
+                }
+
+                return {
+                    valid: errors.length === 0,
+                    errors
+                };
+            }
+        }
+
         class GameUI {
             constructor(canvas, game) {
                 this.canvas = canvas;
@@ -420,7 +515,18 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
                     return;
                 }
 
-                this.game.resolveTurn(this.ordersByPlayer);
+                const validation = this.game.engine.validateOrders(this.ordersByPlayer);
+
+                if (!validation.valid) {
+                    for (const error of validation.errors) {
+                        this.game.log.add(`❌ ${error}`, [this.currentPlayer.id], "error");
+                    }
+                    this.updateLogDisplay();
+                    this.render();
+                    return;
+                }
+
+                this.game.engine.simulateTurn(this.ordersByPlayer);
                 this.ordersByPlayer = {};
                 this.currentPlayerIndex = 0;
                 this.currentPlayer = this.game.players[0];
@@ -684,6 +790,74 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
             }
         }
 
+        /*
+         * GameState contains the mutable state of a single point in time.
+         *
+         * The important distinction is that GameState does not know about
+         * the UI, canvas, or how a turn is submitted. It is just data.
+         *
+         * This gives us a clean path toward:
+         *   UI -> Orders -> GameEngine -> new State -> UI
+         *
+         * The current prototype still mutates one GameState in place, but
+         * the boundary is now explicit and can later be moved server-side.
+         */
+        class GameState {
+            constructor(players = [], population = new Map(), turn = 0) {
+                this.players = players;
+                this.population = population;
+                this.turn = turn;
+            }
+
+            clone() {
+                const players = this.players.map(p => {
+                    const copy = new Player(p.id, p.name, p.color, p.score);
+                    copy.civilianRatio = p.civilianRatio;
+                    return copy;
+                });
+
+                const population = new Map();
+
+                for (const [key, pop] of this.population) {
+                    population.set(
+                        key,
+                        new TilePopulation(
+                            pop.ownerId,
+                            pop.civilians,
+                            pop.soldiers,
+                            pop.babies
+                        )
+                    );
+                }
+
+                return new GameState(players, population, this.turn);
+            }
+
+            serialize() {
+                return {
+                    turn: this.turn,
+                    players: this.players.map(p => ({
+                        id: p.id,
+                        name: p.name,
+                        color: p.color,
+                        score: p.score,
+                        civilianRatio: p.civilianRatio
+                    })),
+                    population: Object.fromEntries(
+                        [...this.population.entries()].map(([key, pop]) => [
+                            key,
+                            {
+                                ownerId: pop.ownerId,
+                                civilians: pop.civilians,
+                                soldiers: pop.soldiers,
+                                babies: pop.babies
+                            }
+                        ])
+                    )
+                };
+            }
+        }
+
         class Game {
             constructor() {
                 this.hexBoard = new HexBoard(2);
@@ -691,9 +865,16 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
                     new Player(1, "Player 1", "#b91c1c", 0),  // Red
                     new Player(2, "Player 2", "#1d4ed8", 0)   // Blue
                 ];
-                this.population = new Map();
+                this.state = new GameState(this.players, new Map(), 0);
+
+                // Compatibility aliases while the prototype is being
+                // migrated. Game logic uses state as the authoritative
+                // container; existing UI code can continue using these.
+                this.population = this.state.population;
+
                 this.conflictResolver = new ConflictResolver();
                 this.log = new GameLog();
+                this.engine = new GameEngine(this);
                 this.setupStartingTiles();
             }
 
@@ -871,6 +1052,9 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
                 for (const player of this.players) {
                     this.growPopulation(player);
                 }
+
+                // The completed resolution produces the next game state.
+                this.state.turn++;
             }
 
             growPopulation(player) {
@@ -902,7 +1086,19 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
         window.addEventListener('DOMContentLoaded', () => {
             const canvas = document.getElementById('gameCanvas');
             const gameObj = new Game();
-            new GameUI(canvas, gameObj);
+            const ui = new GameUI(canvas, gameObj);
+
+            document.getElementById('showStateBtn').addEventListener('click', () => {
+                document.getElementById('stateOutput').textContent =
+                    JSON.stringify(gameObj.engine.getStateSnapshot(), null, 2);
+            });
+
+            document.getElementById('simulateEmptyBtn').addEventListener('click', () => {
+                gameObj.engine.simulateTurn({});
+                ui.render();
+                document.getElementById('stateOutput').textContent =
+                    JSON.stringify(gameObj.engine.getStateSnapshot(), null, 2);
+            });
         });
     </script>
 </body>
