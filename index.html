@@ -41,7 +41,7 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
 
 ## CODING NOTES
 ### Design Pattern:
-    - Game class is pure model + rules, no DOM/canvas knowledge
+    - Game class is pure model + rules, no DOM/canvas knowledge (will eventually move game logic, turn resolution to server side)
     - GameUI class handles rendering and user interactions
 
 ### KNOWN BUGS: 
@@ -50,6 +50,8 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
     - Combat attrition (currently winner keeps full army, no losses modeled)
     - Multiplayer turn loop (currently hotseat/local only)
     - Add log UI to track game progress
+        - Should add a log class 
+        - Would only want the player to see events they could observe ("Player B took tile __ from Player 1 - killing x civilians")
     - Add AI LLM testing ability (copy/paste for now)
         - A prompt generator to provide the current game state and rules to an AI model
         - Ability to paste in AI's next move (via json)
@@ -566,20 +568,14 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
                 do {
                     let rollA = this.rollDie();
                     let rollB = this.rollDie();
-                    let winner = "tie";
-                    winner = (rollA > rollB) ? "A" : winner;
-                    winner = (rollA < rollB) ? "B" : winner;
-                    if (winner == "tie") {
-                        winner = (defenderPlayerId === sideA.playerId) ? "A" : winner;
-                        winner = (defenderPlayerId === sideB.playerId) ? "B" : winner;
-                    }  
-                    if (winner == "tie") {
-                        winner = (sideA.amount > sideB.amount) ? "A" : winner;
-                        winner = (sideA.amount < sideB.amount) ? "B" : winner;
-                    }
-                    if (winner == "tie") {
-                        winner = (this.rollDie(2) >= 2) ? "A" : "B";
-                    }
+                    let winner = null;
+                    if (rollA > rollB) winner = "A";
+                    else if (rollA < rollB) winner = "B";
+                    if (!winner && defenderPlayerId === sideA.playerId) winner = "A";
+                    if (!winner && defenderPlayerId === sideB.playerId) winner = "B";
+                    if (!winner && sideA.amount > sideB.amount) winner = "A";
+                    if (!winner && sideA.amount < sideB.amount) winner = "B";
+                    if (!winner) winner = this.rollDie(2) >= 2 ? "A" : "B"; // 50/50
 
                     if (winner == "A") { 
                         --sideB.amount;
