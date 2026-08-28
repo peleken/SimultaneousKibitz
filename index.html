@@ -28,6 +28,14 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
     - New babies are generated on each tile based on the number of civilians present (1 baby per 2 civilians)
 
 ### Execution Flow:
+    - Two Phase approach 
+        - Collect 
+            - Get all the players intentions 
+        - Resolve
+            - Movement
+            - Conflict
+            - Population
+
     - Validate
         - Validate all orders submitted
     - Movement
@@ -41,23 +49,28 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
 
 ## CODING NOTES
 ### Design Pattern:
-    - Game class is pure model + rules, no DOM/canvas knowledge (will eventually move game logic, turn resolution to server side)
+    - Game class is pure model + rules, no DOM/canvas knowledge (Game should be playable without a browser, or human friendly UI. Will eventually move game logic, turn resolution to server side)
     - GameUI class handles rendering and user interactions
 
 ### KNOWN BUGS: 
 
 ### TO DO:
-    - Combat attrition (currently winner keeps full army, no losses modeled)
+    - Introduce a turn class to track players submissions
+    - Decouple Game state (pure data), with game (Game logic)
+    - Turn validation logic on back end (is this a legal order?)
     - Multiplayer turn loop (currently hotseat/local only)
-    - Add log UI to track game progress
-        - Should add a log class 
-        - Would only want the player to see events they could observe ("Player B took tile __ from Player 1 - killing x civilians")
+    - Add win condition (opponents have no more players on board)
+        - Could potentially add alternative conditions in the future
     - Add AI LLM testing ability (copy/paste for now)
         - A prompt generator to provide the current game state and rules to an AI model
         - Ability to paste in AI's next move (via json)
-    - Player Names
+    - Player registration system
+        - Get player names, have them log in, maybe email them when their turn is up
     - Track Player deaths, kills (civilians, babies, and soldiers)
     - Allow more players 
+    - Hide game log events from player which were hidden behind fog of war 
+    - Initial game setup menu
+        - Options for # of players, map size, fog of war, win conditions, starting population...
 -->
 <html lang="en">
 <head>
@@ -68,13 +81,22 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
         body { margin: 0; background-color: #1a1a1a; color: white; text-align: center; font-family: sans-serif; }
         #uiContainer { display: flex; flex-direction: column; align-items: center; gap: 8px; margin: 10px; }
         canvas { background-color: #0f172a; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.5); cursor: pointer; }
-        .panel { background: #2a2a2a; padding: 10px 20px; border-radius: 6px; display: flex; gap: 15px; align-items: center; }
+        .panel { background: #2a2a2a; padding: 10px 20px; border-radius: 6px; display: flex; gap: 15px; align-items: center; flex-wrap: wrap; justify-content: center; }
         button { background: #4f46e5; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-weight: bold; }
         button:hover { background: #4338ca; }
         button:disabled { background: #555; cursor: not-allowed; }
         #turnIndicator { font-weight: bold; font-size: 1.1em; border: 2px solid; }
         .unit-toggle { background: #374151; border: 1px solid #4b5563; padding: 6px 12px; }
         .unit-toggle.active { background: #059669; border-color: #10b981; }
+        #gameLog { background: #1f2937; padding: 10px; border-radius: 6px; max-height: 150px; overflow-y: auto; text-align: left; width: 80%; margin: 0 auto; font-family: monospace; font-size: 12px; white-space: pre-wrap; }
+        #gameLogEntry { color: #9ca3af; margin: 2px 0; padding: 2px 4px; border-radius: 2px; }
+        #gameLogEntry.visible { color: #fff; background: rgba(255,255,255,0.1); }
+        .log-attack { color: #f59e0b; }
+        .log-defend { color: #3b82f6; }
+        .log-victory { color: #10b981; font-weight: bold; }
+        .log-defeat { color: #ef4444; font-weight: bold; }
+        .log-growth { color: #8b5cf6; }
+        .log-error { color: #ef4444; }
     </style>
 </head>
 <body>
@@ -108,9 +130,30 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
         <div class="panel">
             <button id="endTurnBtn">Submit Orders</button>
         </div>
+
+        <h3>Game Log</h3>
+        <div id="gameLog"></div>
     </div>
 
     <script>
+        class GameLog {
+            constructor() {
+                this.entries = [];
+            }
+
+            add(message, visibleTo = [], type = "default") {
+                this.entries.push({ message, visibleTo, type, turn: this.entries.length });
+            }
+
+            getPlayerLog(playerId) {
+                return this.entries.filter(e => !e.visibleTo.length || e.visibleTo.includes(playerId));
+            }
+
+            clear() {
+                this.entries = [];
+            }
+        }
+
         class BoardRenderer {
             constructor(canvas, tileSize = 65) {
                 this.canvas = canvas;
@@ -312,7 +355,14 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
                     const countInput = document.getElementById('unitCountInput');
                     const amount = parseInt(countInput.value, 10);
                     if (amount > 0 && this.selectedKey && this.targetKey) {
-                        this.pendingOrders.push(new Order(this.selectedUnitType, this.currentPlayer.id, this.selectedKey, this.targetKey, amount));
+                        const order = new Order(this.selectedUnitType, this.currentPlayer.id, this.selectedKey, this.targetKey, amount);
+                        this.pendingOrders.push(order);
+                        this.game.log.add(
+                            `${this.currentPlayer.name} orders ${amount} ${this.selectedUnitType === 'moveSoldiers' ? '💂' : '🧑‍🌾'} from ${this.selectedKey} to ${this.targetKey}`,
+                            [this.currentPlayer.id],
+                            "default"
+                        );
+                        this.updateLogDisplay();
                         this.selectedKey = null;
                         this.targetKey = null;
                         this.hideOrderPanel();
@@ -376,6 +426,10 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
                 this.currentPlayer = this.game.players[0];
                 document.getElementById('ratioSlider').value = this.currentPlayer.civilianRatio * 100;
                 document.getElementById('ratioValue').textContent = `${this.currentPlayer.civilianRatio * 100}%`;
+
+                // Add turn separator to log
+                this.game.log.add("--- Round Complete ---", this.game.players.map(p => p.id), "default");
+                this.updateLogDisplay();
                 this.render();
             }
 
@@ -424,7 +478,7 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
                 const avail = this.getAvailableUnits(this.selectedKey);
                 const targetPop = this.game.population.get(this.targetKey);
                 const isTargetOwnedByMe = targetPop && targetPop.ownerId === this.currentPlayer.id;
-                
+
                 const btnCivilian = document.getElementById('toggleCivilianBtn');
                 const btnSoldier = document.getElementById('toggleSoldierBtn');
 
@@ -469,8 +523,27 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
                     : `Submit Orders (pass to ${this.game.players[this.currentPlayerIndex + 1].name})`;
             }
 
+            updateLogDisplay() {
+                const logContainer = document.getElementById('gameLog');
+                const playerLog = this.game.log.getPlayerLog(this.currentPlayer.id);
+                logContainer.innerHTML = playerLog.map(entry => {
+                    let className = '';
+                    switch(entry.type) {
+                        case 'attack': className = 'log-attack'; break;
+                        case 'defend': className = 'log-defend'; break;
+                        case 'victory': className = 'log-victory'; break;
+                        case 'defeat': className = 'log-defeat'; break;
+                        case 'growth': className = 'log-growth'; break;
+                        case 'error': className = 'log-error'; break;
+                    }
+                    return `<div class="gameLogEntry visible ${className}">${entry.message}</div>`;
+                }).join('');
+                logContainer.scrollTop = logContainer.scrollHeight;
+            }
+
             render() {
                 this.updateTurnIndicator();
+                this.updateLogDisplay();
 
                 const visible = this.game.getVisibleTileKeys(this.currentPlayer);
                 this.boardRenderer.render(this.game.hexBoard, this.game, visible, this.selectedKey, this.pendingOrders);
@@ -549,6 +622,7 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
             }
         }
 
+        // Players declaration of intent
         class Order {
             constructor(type, playerId, from, to, amount) {
                 this.type = type; // "moveSoldiers" or "moveCivilians"
@@ -569,15 +643,17 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
                     let rollA = this.rollDie();
                     let rollB = this.rollDie();
                     let winner = null;
+
                     if (rollA > rollB) winner = "A";
                     else if (rollA < rollB) winner = "B";
+
                     if (!winner && defenderPlayerId === sideA.playerId) winner = "A";
                     if (!winner && defenderPlayerId === sideB.playerId) winner = "B";
                     if (!winner && sideA.amount > sideB.amount) winner = "A";
                     if (!winner && sideA.amount < sideB.amount) winner = "B";
-                    if (!winner) winner = this.rollDie(2) >= 2 ? "A" : "B"; // 50/50
+                    if (!winner) winner = this.rollDie(2) >= 2 ? "A" : "B";
 
-                    if (winner == "A") { 
+                    if (winner === "A") {
                         --sideB.amount;
                     } else {
                         --sideA.amount;
@@ -588,9 +664,9 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
 
             resolve(attackers, defender) {
                 let contenders = attackers.map(a => ({ ...a }));
-                
+
                 while (contenders.length > 1) {
-                    // Refinement 1: Fisher-Yates shuffle before sorting by army size to eliminate tie bias
+                    // Fisher-Yates shuffle before sorting by army size to eliminate tie bias
                     contenders.sort(() => Math.random() - 0.5);
                     contenders.sort((a, b) => b.amount - a.amount);
 
@@ -617,6 +693,7 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
                 ];
                 this.population = new Map();
                 this.conflictResolver = new ConflictResolver();
+                this.log = new GameLog();
                 this.setupStartingTiles();
             }
 
@@ -639,6 +716,7 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
                         this.key(position.q, position.r),
                         new TilePopulation(player.id, 2, 3, 1)
                     );
+                    this.log.add(`${player.name} starts at (${position.q},${position.r}) with 2🧑‍🌾 3💂 1👶`, [player.id], "default");
                 });
             }
 
@@ -676,23 +754,41 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
 
             resolveTurn(ordersByPlayerId) {
                 const arrivals = new Map(); // destKey -> [{ playerId, amount }]
+                const allPlayerIds = this.players.map(p => p.id);
 
                 // 1. Process Movements
                 for (const [playerIdStr, orders] of Object.entries(ordersByPlayerId)) {
                     const playerId = Number(playerIdStr);
+                    const player = this.getPlayerById(playerId);
                     for (const order of orders) {
-                        if (!this.validateOrder(order, playerId)) continue;
+                        if (!this.validateOrder(order, playerId)) {
+                            this.log.add(`❌ ${player.name} invalid order: ${order.type} from ${order.from} to ${order.to} (amount: ${order.amount})`, [playerId], "error");
+                            continue;
+                        }
 
                         const src = this.population.get(order.from);
+                        const destKey = order.to;
+                        const unitType = order.type === "moveSoldiers" ? "💂" : "🧑‍🌾";
+
+                        this.log.add(
+                            `${player.name} moves ${order.amount}${unitType} from ${order.from} to ${destKey}`,
+                            allPlayerIds,
+                            order.type === "moveSoldiers" ? "attack" : "default"
+                        );
 
                         if (order.type === "moveSoldiers") {
                             src.soldiers -= order.amount;
-                            if (!arrivals.has(order.to)) arrivals.set(order.to, []);
-                            arrivals.get(order.to).push({ playerId, amount: order.amount });
+                            if (!arrivals.has(destKey)) arrivals.set(destKey, []);
+                            arrivals.get(destKey).push({ playerId, amount: order.amount });
                         } else if (order.type === "moveCivilians") {
                             src.civilians -= order.amount;
-                            const dest = this.population.get(order.to);
+                            const dest = this.population.get(destKey);
                             dest.civilians += order.amount;
+                            this.log.add(
+                                `${player.name} relocates ${order.amount}🧑‍🌾 to ${destKey}`,
+                                [playerId],
+                                "default"
+                            );
                         }
                     }
                 }
@@ -704,43 +800,81 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
                         destPop = new TilePopulation(null, 0, 0, 0);
                         this.population.set(destKey, destPop);
                     }
-                    this.resolveArrivals(destPop, incoming);
+
+                    const defender = destPop.ownerId
+                        ? { playerId: destPop.ownerId, amount: destPop.soldiers }
+                        : null;
+
+                    const attackers = incoming.filter(a => a.playerId !== destPop.ownerId);
+                    const reinforcements = incoming.filter(a => a.playerId === destPop.ownerId);
+
+                    // Apply reinforcements first
+                    for (const r of reinforcements) {
+                        destPop.soldiers += r.amount;
+                        const player = this.getPlayerById(r.playerId);
+                        this.log.add(
+                            `${player.name} reinforces ${destKey} with ${r.amount}💂`,
+                            allPlayerIds,
+                            "defend"
+                        );
+                    }
+
+                    if (attackers.length === 0) continue;
+
+                    // Log battle start
+                    const attackerNames = attackers.map(a => {
+                        const p = this.getPlayerById(a.playerId);
+                        return `${p.name} (${a.amount}💂)`;
+                    }).join(", ");
+                    const defenderName = defender ? `${this.getPlayerById(defender.playerId).name} (${defender.amount}💂)` : "unclaimed";
+                    this.log.add(
+                        `⚔️ Battle at ${destKey}: ${attackerNames} vs ${defenderName}`,
+                        allPlayerIds,
+                        "attack"
+                    );
+
+                    const result = this.conflictResolver.resolve(attackers, defender);
+
+                    // Refinement 2: Unprotected civilians and babies perish when control changes
+                    const oldOwnerId = destPop.ownerId;
+                    const newOwnerId = result.winnerId;
+
+                    if (oldOwnerId !== null && newOwnerId !== oldOwnerId) {
+                        const oldOwner = this.getPlayerById(oldOwnerId);
+                        const newOwner = this.getPlayerById(newOwnerId);
+                        this.log.add(
+                            `💀 ${oldOwner.name} loses ${destKey}! ${destPop.civilians}🧑‍🌾 and ${destPop.babies}👶 perish. ${newOwner.name} takes control with ${result.survivingSoldiers}💂`,
+                            allPlayerIds,
+                            "defeat"
+                        );
+                        destPop.civilians = 0;
+                        destPop.babies = 0;
+                    } else if (newOwnerId === oldOwnerId && oldOwnerId !== null) {
+                        this.log.add(
+                            `🛡️ ${this.getPlayerById(oldOwnerId).name} defends ${destKey}! ${result.survivingSoldiers}💂 remain`,
+                            allPlayerIds,
+                            "victory"
+                        );
+                    } else {
+                        this.log.add(
+                            `🏆 ${this.getPlayerById(newOwnerId).name} captures ${destKey} with ${result.survivingSoldiers}💂`,
+                            allPlayerIds,
+                            "victory"
+                        );
+                    }
+
+                    destPop.ownerId = result.winnerId;
+                    destPop.soldiers = result.survivingSoldiers;
                 }
 
                 // 3. Population Growth
-                for (const player of this.players) this.growPopulation(player);
-            }
-
-            resolveArrivals(destPop, incoming) {
-                const reinforcements = incoming.filter(a => a.playerId === destPop.ownerId);
-                for (const r of reinforcements) destPop.soldiers += r.amount;
-
-                const attackers = incoming.filter(a => a.playerId !== destPop.ownerId);
-                if (attackers.length === 0) return;
-
-                if (destPop.ownerId === null && attackers.length === 1) {
-                    destPop.ownerId = attackers[0].playerId;
-                    destPop.soldiers += attackers[0].amount;
-                    return;
+                for (const player of this.players) {
+                    this.growPopulation(player);
                 }
-
-                const defender = destPop.ownerId
-                    ? { playerId: destPop.ownerId, amount: destPop.soldiers }
-                    : null;
-
-                const result = this.conflictResolver.resolve(attackers, defender);
-
-                // Refinement 2: Unprotected civilians and babies perish when control changes
-                if (destPop.ownerId !== null && result.winnerId !== destPop.ownerId) {
-                    destPop.civilians = 0;
-                    destPop.babies = 0;
-                }
-
-                destPop.ownerId = result.winnerId;
-                destPop.soldiers = result.survivingSoldiers;
             }
 
             growPopulation(player) {
+                let totalGrowth = 0;
                 for (const [key, pop] of this.population) {
                     if (pop.ownerId !== player.id) continue;
 
@@ -752,6 +886,15 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
                     pop.civilians += newCivilians;
                     pop.soldiers += newSoldiers;
                     pop.babies = newBabies;
+
+                    totalGrowth += newCivilians + newSoldiers + newBabies;
+                }
+                if (totalGrowth > 0) {
+                    this.log.add(
+                        `${player.name} population grows: +${totalGrowth} units (ratio: ${Math.round(player.civilianRatio * 100)}% civilian)`,
+                        [player.id],
+                        "growth"
+                    );
                 }
             }
         }
