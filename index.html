@@ -1,6 +1,7 @@
 <!DOCTYPE html>
-<!-- 
-https://sm-dev-tool-kit.localhost/php/test/kibitz/
+<!--
+https://sm-dev-tool-kit.localhost/php/test/kibitz/  
+
 ## Game Rules
 ### Each player submits their turn simultaneously, then the game engine processes all turns and updates the board state.
 
@@ -11,7 +12,7 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
     - The player can choose (via slider) what percentage of babies become civilians or soldiers
 
 ### Player Turn:
-    - Players can adjust their civilian/soldier ratio 
+    - Players can adjust their civilian/soldier ratio
     - Players can attempt to claim an unowned adjacent tile by moving one or more soldiers to it.
     - Players can move civilians to owned tiles to increase their population.
 
@@ -19,14 +20,14 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
     - Once all players have submitted their turns, the game engine processes the moves and updates the board state
     - Any tiles with multiple players attempting to claim them will be resolved via a conflict resolution mechanic (currently dice rolls)
     - Conflicts are resolved similar to Risk (for now, 6 sided die rolls)
-        - If a player owns the tile, they have defender advantage 
+        - If a player owns the tile, they have defender advantage
         - If the tile is unowned, the larger army has advantage
         - Ties are re-rolled until a winner is determined
-    - There can only be one owner per tile, and the winner of the conflict takes ownership of the tile 
+    - There can only be one owner per tile, and the winner of the conflict takes ownership of the tile
     - Any existing babies on a tile will grow into civilians or soldiers based on the player's chosen ratio
     - New babies are generated on each tile based on the number of civilians present (1 baby per 2 civilians)
 
-### Execution FLow:
+### Execution Flow:
     - Validate
         - Validate all orders submitted
     - Movement
@@ -43,14 +44,22 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
     - Game class is pure model + rules, no DOM/canvas knowledge
     - GameUI class handles rendering and user interactions
 
+### CHANGES THIS PASS:
+    - Turns are now collected per-player and resolved together in Game.resolveTurn(),
+      instead of each player's End Turn immediately mutating shared state.
+    - ConflictResolver.resolve() implemented: dice rolls, defender/size advantage, reroll on ties.
+    - Game.validateOrder() is now actually called (was dead code with an out-of-scope
+      reference to `player` before).
+    - GameUI now cycles through players collecting orders, then calls resolveTurn once
+      the last player submits.
+
 ### TO DO:
     - Movement/Order system for civilians (to owned tiles)
-    - Turn tracking and player switching
-    - Conflict resolution system
-    - Multiplayer turn loop 
+    - Combat attrition (currently winner keeps full army, no losses modeled)
+    - Multiplayer turn loop (currently hotseat/local only)
 ### Thoughts
     - I'd like this to potentially work as a board game, so 'fog of war' should maybe be optional and decoupled from core mechanics.
-    - I'd like to have civilians represent a moral quandary for the players (more thought needed on this), for purposes of minimum viable product, enemy soldiers will kill unprotected civilians for now. 
+    - I'd like to have civilians represent a moral quandary for the players (more thought needed on this), for purposes of minimum viable product, enemy soldiers will kill unprotected civilians for now.
         - Maybe scoring could be based on civilian population and a penalty for civilians killed.
 -->
 <html lang="en">
@@ -66,11 +75,14 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
         button { background: #4f46e5; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-weight: bold; }
         button:hover { background: #4338ca; }
         button:disabled { background: #555; cursor: not-allowed; }
+        #turnIndicator { font-weight: bold; font-size: 1.1em; border: 2px solid; }
     </style>
 </head>
 <body>
     <h1>Hex Population Prototype</h1>
     <div id="uiContainer">
+        <div id="turnIndicator" class="panel"></div>
+
         <div class="panel">
             <label for="ratioSlider">Civilian Ratio (%): </label>
             💂 Soldier
@@ -78,9 +90,9 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
             🧑‍🌾 Civilian
             <span id="ratioValue">50%</span>
         </div>
-        
+
         <div id="populationStatus" class="panel"></div>
-        
+
         <div id="orderPanel" class="panel" style="display:none;">
             <span id="orderInfo">Select Target Tile</span>
             <input type="number" id="soldierCountInput" min="1" value="1" style="width: 50px;">
@@ -89,9 +101,9 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
         </div>
 
         <canvas id="gameCanvas" width="800" height="600"></canvas>
-        
+
         <div class="panel">
-            <button id="endTurnBtn">End Turn & Resolve</button>
+            <button id="endTurnBtn">Submit Orders</button>
         </div>
     </div>
 
@@ -113,8 +125,8 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
             }
 
             getTileAtPixel(px, py, board) {
-                const q = ((px - this.originX) * Math.sqrt(3)/3 - (py - this.originY) / 3) / this.tileSize;
-                const r = (py - this.originY) * 2/3 / this.tileSize;
+                const q = ((px - this.originX) * Math.sqrt(3) / 3 - (py - this.originY) / 3) / this.tileSize;
+                const r = (py - this.originY) * 2 / 3 / this.tileSize;
                 const rounded = this.roundHex(q, r);
                 return board.hasTile(rounded.q, rounded.r) ? rounded : null;
             }
@@ -141,7 +153,7 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
                 for (const tile of board.tiles) {
                     const key = `${tile.q},${tile.r}`;
                     const { x, y } = this.axialToPixel(tile.q, tile.r);
-                    
+
                     if (!visibleKeys.has(key)) {
                         this.drawFog(x, y);
                         continue;
@@ -150,7 +162,7 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
                     const pop = game.population.get(key);
                     const fillColor = pop?.ownerId ? game.getPlayerById(pop.ownerId)?.color || this.terrainColor : this.terrainColor;
                     const isSelected = (key === selectedKey);
-                    
+
                     this.drawHex(x, y, fillColor, isSelected);
                 }
             }
@@ -162,7 +174,6 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
                     const start = this.axialToPixel(fq, fr);
                     const end = this.axialToPixel(tq, tr);
 
-                    // Draw movement vector arrow
                     this.ctx.beginPath();
                     this.ctx.moveTo(start.x, start.y);
                     this.ctx.lineTo(end.x, end.y);
@@ -170,16 +181,15 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
                     this.ctx.lineWidth = 4;
                     this.ctx.stroke();
 
-                    // Movement order indicator tag
                     this.ctx.fillStyle = '#f59e0b';
                     this.ctx.beginPath();
-                    this.ctx.arc((start.x + end.x)/2, (start.y + end.y)/2, 10, 0, Math.PI * 2);
+                    this.ctx.arc((start.x + end.x) / 2, (start.y + end.y) / 2, 10, 0, Math.PI * 2);
                     this.ctx.fill();
                     this.ctx.fillStyle = '#000';
                     this.ctx.font = 'bold 10px sans-serif';
                     this.ctx.textAlign = 'center';
                     this.ctx.textBaseline = 'middle';
-                    this.ctx.fillText(`💂${order.amount}`, (start.x + end.x)/2, (start.y + end.y)/2);
+                    this.ctx.fillText(`💂${order.amount}`, (start.x + end.x) / 2, (start.y + end.y) / 2);
                 }
             }
 
@@ -208,14 +218,14 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
             }
 
             drawPopulation(x, y, pop) {
-                y -= this.tileSize/2; // Position above the tile
+                y -= this.tileSize / 2;
                 this.ctx.fillStyle = '#fff';
                 this.ctx.font = '12px sans-serif';
                 this.ctx.textAlign = 'center';
                 this.ctx.textBaseline = 'alphabetic';
                 this.ctx.fillText(
                     `🧑‍🌾:${pop.civilians}💂:${pop.soldiers}👶:${pop.babies}`
-                , x, y + this.tileSize * 0.5);
+                    , x, y + this.tileSize * 0.5);
             }
 
             drawHex(x, y, fillColor, isSelected = false) {
@@ -243,10 +253,14 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
                 this.canvas = canvas;
                 this.game = game;
                 this.boardRenderer = new BoardRenderer(canvas);
+
+                this.currentPlayerIndex = 0;
                 this.currentPlayer = game.players[0];
+                this.ordersByPlayer = {}; // playerId -> Order[], collected across the round
+
                 this.selectedKey = null;
                 this.targetKey = null;
-                this.pendingOrders = [];
+                this.pendingOrders = []; // orders for the CURRENT player, not yet submitted
 
                 this.bindControls();
                 this.render();
@@ -290,12 +304,37 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
                 });
 
                 document.getElementById('endTurnBtn').addEventListener('click', () => {
-                    this.game.processTurn(this.currentPlayer, this.pendingOrders);
-                    this.pendingOrders = [];
-                    this.selectedKey = null;
-                    this.hideOrderPanel();
-                    this.render();
+                    this.submitCurrentPlayerOrders();
                 });
+            }
+
+            // Stores the current player's orders, then either hands control to the
+            // next player, or (if everyone has submitted) resolves the whole round at once.
+            submitCurrentPlayerOrders() {
+                this.ordersByPlayer[this.currentPlayer.id] = this.pendingOrders;
+                this.pendingOrders = [];
+                this.selectedKey = null;
+                this.targetKey = null;
+                this.hideOrderPanel();
+
+                const isLastPlayer = this.currentPlayerIndex === this.game.players.length - 1;
+
+                if (!isLastPlayer) {
+                    this.currentPlayerIndex++;
+                    this.currentPlayer = this.game.players[this.currentPlayerIndex];
+                    document.getElementById('ratioSlider').value = this.currentPlayer.civilianRatio * 100;
+                    document.getElementById('ratioValue').textContent = `${this.currentPlayer.civilianRatio * 100}%`;
+                    this.render();
+                    return;
+                }
+
+                this.game.resolveTurn(this.ordersByPlayer);
+                this.ordersByPlayer = {};
+                this.currentPlayerIndex = 0;
+                this.currentPlayer = this.game.players[0];
+                document.getElementById('ratioSlider').value = this.currentPlayer.civilianRatio * 100;
+                document.getElementById('ratioValue').textContent = `${this.currentPlayer.civilianRatio * 100}%`;
+                this.render();
             }
 
             handleTileClick(q, r) {
@@ -306,22 +345,19 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
 
                 const pop = this.game.population.get(clickedKey);
 
-                // If no origin tile is selected, select owned tile with soldiers
                 if (!this.selectedKey) {
                     if (pop && pop.ownerId === this.currentPlayer.id && pop.soldiers > 0) {
                         this.selectedKey = clickedKey;
                     }
                 } else {
-                    // If origin is selected, check if clicked tile is an adjacent neighbor
                     const [sq, sr] = this.selectedKey.split(',').map(Number);
                     const neighbors = this.game.hexBoard.getNeighbors(sq, sr);
                     const isNeighbor = neighbors.some(n => n.q === q && n.r === r);
 
                     if (isNeighbor) {
                         this.targetKey = clickedKey;
-                        this.showOrderPanel(pop);
+                        this.showOrderPanel();
                     } else {
-                        // Change origin selection if clicking another owned tile
                         if (pop && pop.ownerId === this.currentPlayer.id && pop.soldiers > 0) {
                             this.selectedKey = clickedKey;
                             this.hideOrderPanel();
@@ -335,7 +371,6 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
             }
 
             showOrderPanel() {
-                const [sq, sr] = this.selectedKey.split(',').map(Number);
                 const sourcePop = this.game.population.get(this.selectedKey);
                 const panel = document.getElementById('orderPanel');
                 const info = document.getElementById('orderInfo');
@@ -351,7 +386,20 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
                 document.getElementById('orderPanel').style.display = 'none';
             }
 
+            updateTurnIndicator() {
+                const indicator = document.getElementById('turnIndicator');
+                indicator.textContent = `${this.currentPlayer.name}'s turn to give orders`;
+                indicator.style.borderColor = this.currentPlayer.color;
+
+                const isLastPlayer = this.currentPlayerIndex === this.game.players.length - 1;
+                document.getElementById('endTurnBtn').textContent = isLastPlayer
+                    ? 'Submit Orders & Resolve Round'
+                    : `Submit Orders (pass to ${this.game.players[this.currentPlayerIndex + 1].name})`;
+            }
+
             render() {
+                this.updateTurnIndicator();
+
                 const visible = this.game.getVisibleTileKeys(this.currentPlayer);
                 this.boardRenderer.render(this.game.hexBoard, this.game, visible, this.selectedKey, this.pendingOrders);
 
@@ -408,10 +456,10 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
             }
 
             getNeighbors(q, r) {
-                const dirs = [[1,0],[1,-1],[0,-1],[-1,0],[-1,1],[0,1]];
+                const dirs = [[1, 0], [1, -1], [0, -1], [-1, 0], [-1, 1], [0, 1]];
                 return dirs
                     .map(([dq, dr]) => ({ q: q + dq, r: r + dr }))
-                    .filter(({q, r}) => this.hasTile(q, r));
+                    .filter(({ q, r }) => this.hasTile(q, r));
             }
 
             hasTile(q, r) {
@@ -439,11 +487,58 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
             }
         }
 
-        // Placeholder for future conflict resolution logic
-        // Put in its own class so we can experiment with different mechanics without cluttering the Game class
+        // Dice-based conflict resolution, similar to Risk.
+        // Kept as its own class so the mechanic can be swapped out without touching Game.
         class ConflictResolver {
-           constructor() {}
-           resolve(attackers, defender) { // attackers: [{playerId, amount}], defender: {playerId, amount}
+            rollDie() {
+                return Math.floor(Math.random() * 6) + 1;
+            }
+
+            // One battle between two sides: { playerId, amount }.
+            // defenderPlayerId (or null) tells us who gets the "defender" bonus;
+            // if neither side is the defender, the larger army gets the bonus instead.
+            // Ties are rerolled until there's a winner.
+            rollBattle(sideA, sideB, defenderPlayerId) {
+                while (true) {
+                    let rollA = this.rollDie();
+                    let rollB = this.rollDie();
+
+                    if (defenderPlayerId === sideA.playerId) rollA += 1;
+                    else if (defenderPlayerId === sideB.playerId) rollB += 1;
+                    else if (sideA.amount !== sideB.amount) {
+                        if (sideA.amount > sideB.amount) rollA += 1;
+                        else rollB += 1;
+                    }
+
+                    if (rollA === rollB) continue; // re-roll ties per the rules doc
+                    return rollA > rollB ? sideA : sideB;
+                }
+            }
+
+            // attackers: [{ playerId, amount }] — everyone who moved soldiers INTO this tile
+            //            and does not already own it
+            // defender: { playerId, amount } or null if the tile is currently unowned
+            // Returns { winnerId, survivingSoldiers }
+            resolve(attackers, defender) {
+                // If more than one player is attacking the same tile at once, they fight
+                // each other first (no defender bonus between attackers), largest army
+                // surviving as the sole attacker, before facing the defender.
+                let contenders = attackers.map(a => ({ ...a }));
+                while (contenders.length > 1) {
+                    contenders.sort((a, b) => b.amount - a.amount);
+                    const winner = this.rollBattle(contenders[0], contenders[1], null);
+                    contenders = [winner, ...contenders.slice(2)];
+                }
+                const soleAttacker = contenders[0];
+
+                if (!defender) {
+                    // Uncontested claim on an unowned tile
+                    return { winnerId: soleAttacker.playerId, survivingSoldiers: soleAttacker.amount };
+                }
+
+                const winner = this.rollBattle(soleAttacker, defender, defender.playerId);
+                // NOTE: MVP simplification — winner keeps their full army, no attrition modeled yet.
+                return { winnerId: winner.playerId, survivingSoldiers: winner.amount };
             }
         }
 
@@ -455,6 +550,7 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
                     new Player(2, "Player 2", "#1d4ed8", 0)   // Blue
                 ];
                 this.population = new Map();
+                this.conflictResolver = new ConflictResolver();
                 this.setupStartingTiles();
             }
 
@@ -473,7 +569,6 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
                 this.players.forEach((player, i) => {
                     const position = startingPositions[i];
                     if (!position) return;
-                    // Give player starting soldiers to test orders
                     this.population.set(
                         this.key(position.q, position.r),
                         new TilePopulation(player.id, 2, 3, 1)
@@ -494,35 +589,85 @@ https://sm-dev-tool-kit.localhost/php/test/kibitz/
                 return visible;
             }
 
-            validateOrder(order, board, population) {
-                if (!this.getVisibleTileKeys(player).has(order.from)) return false;
-                // check adjacency, amount > 0, source has enough, etc.
+            // Confirms an order is legal BEFORE movement is applied: the source tile must
+            // be owned by the ordering player, have enough soldiers, and the destination
+            // must be an actual neighbor. Called from resolveTurn for every submitted order.
+            validateOrder(order, playerId) {
+                const src = this.population.get(order.from);
+                if (!src || src.ownerId !== playerId) return false;
+                if (order.amount <= 0 || src.soldiers < order.amount) return false;
+
+                const [q, r] = order.from.split(',').map(Number);
+                const [tq, tr] = order.to.split(',').map(Number);
+                return this.hexBoard.getNeighbors(q, r).some(n => n.q === tq && n.r === tr);
             }
 
-            processTurn(player, orders = []) {
-                // 1. Process movement orders
-                for (const order of orders) {
-                    if (order.type === "moveSoldiers") {
-                        const sourcePop = this.population.get(order.from);
-                        if (sourcePop && sourcePop.soldiers >= order.amount) {
-                            sourcePop.soldiers -= order.amount;
-                            
-                            let destPop = this.population.get(order.to);
-                            if (!destPop) {
-                                destPop = new TilePopulation(player.id, 0, 0, 0);
-                                this.population.set(order.to, destPop);
-                            }
-                            
-                            // Uncontested claim/move
-                            if (destPop.ownerId === null || destPop.ownerId === player.id) {
-                                destPop.ownerId = player.id;
-                                destPop.soldiers += order.amount;
-                            }
-                        }
+            // Entry point for a full round: ordersByPlayerId = { [playerId]: Order[] }
+            // for every player, collected simultaneously by GameUI before this is called.
+            resolveTurn(ordersByPlayerId) {
+                // 1. Movement — deduct soldiers from every valid order's source tile and
+                //    group everyone converging on the same destination together, so
+                //    contested tiles can be resolved as a single conflict.
+                const arrivals = new Map(); // destKey -> [{ playerId, amount }]
+
+                for (const [playerIdStr, orders] of Object.entries(ordersByPlayerId)) {
+                    const playerId = Number(playerIdStr);
+                    for (const order of orders) {
+                        if (order.type !== "moveSoldiers") continue;
+                        if (!this.validateOrder(order, playerId)) continue;
+
+                        const src = this.population.get(order.from);
+                        src.soldiers -= order.amount;
+
+                        if (!arrivals.has(order.to)) arrivals.set(order.to, []);
+                        arrivals.get(order.to).push({ playerId, amount: order.amount });
                     }
                 }
 
-                // 2. Population growth & baby maturation
+                // 2. Conflict resolution — one destination tile at a time
+                for (const [destKey, incoming] of arrivals) {
+                    let destPop = this.population.get(destKey);
+                    if (!destPop) {
+                        destPop = new TilePopulation(null, 0, 0, 0);
+                        this.population.set(destKey, destPop);
+                    }
+                    this.resolveArrivals(destPop, incoming);
+                }
+
+                // 3. Population management — mature babies, spawn new ones, per player
+                for (const player of this.players) this.growPopulation(player);
+            }
+
+            // Handles everyone who moved soldiers onto a single tile this round:
+            // the owner's own reinforcements apply directly, then any remaining
+            // (non-owner) attackers are sent to the ConflictResolver.
+            resolveArrivals(destPop, incoming) {
+                const reinforcements = incoming.filter(a => a.playerId === destPop.ownerId);
+                for (const r of reinforcements) destPop.soldiers += r.amount;
+
+                const attackers = incoming.filter(a => a.playerId !== destPop.ownerId);
+                if (attackers.length === 0) return;
+
+                // Uncontested claim: nobody owns the tile yet, and only one player is moving in
+                if (destPop.ownerId === null && attackers.length === 1) {
+                    destPop.ownerId = attackers[0].playerId;
+                    destPop.soldiers += attackers[0].amount;
+                    return;
+                }
+
+                const defender = destPop.ownerId
+                    ? { playerId: destPop.ownerId, amount: destPop.soldiers }
+                    : null;
+
+                const result = this.conflictResolver.resolve(attackers, defender);
+                destPop.ownerId = result.winnerId;
+                destPop.soldiers = result.survivingSoldiers;
+            }
+
+            // Baby maturation + new baby generation for one player's tiles.
+            // Uses each tile's pre-maturation civilian count to seed next round's babies,
+            // per the Execution Flow order (mature existing babies, THEN generate new ones).
+            growPopulation(player) {
                 for (const [key, pop] of this.population) {
                     if (pop.ownerId !== player.id) continue;
 
