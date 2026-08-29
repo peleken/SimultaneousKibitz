@@ -1,0 +1,19 @@
+body { margin: 0; background-color: #1a1a1a; color: white; text-align: center; font-family: sans-serif; }
+#uiContainer { display: flex; flex-direction: column; align-items: center; gap: 8px; margin: 10px; }
+canvas { background-color: #0f172a; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.5); cursor: pointer; }
+.panel { background: #2a2a2a; padding: 10px 20px; border-radius: 6px; display: flex; gap: 15px; align-items: center; flex-wrap: wrap; justify-content: center; }
+button { background: #4f46e5; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-weight: bold; }
+button:hover { background: #4338ca; }
+button:disabled { background: #555; cursor: not-allowed; }
+#turnIndicator { font-weight: bold; font-size: 1.1em; border: 2px solid; }
+.unit-toggle { background: #374151; border: 1px solid #4b5563; padding: 6px 12px; }
+.unit-toggle.active { background: #059669; border-color: #10b981; }
+#gameLog { background: #1f2937; padding: 10px; border-radius: 6px; max-height: 150px; overflow-y: auto; text-align: left; width: 80%; margin: 0 auto; font-family: monospace; font-size: 12px; white-space: pre-wrap; }
+.gameLogEntry { color: #9ca3af; margin: 2px 0; padding: 2px 4px; border-radius: 2px; }
+.gameLogEntry.visible { color: #fff; background: rgba(255,255,255,0.1); }
+.log-attack { color: #f59e0b; }
+.log-defend { color: #3b82f6; }
+.log-victory { color: #10b981; font-weight: bold; }
+.log-defeat { color: #ef4444; font-weight: bold; }
+.log-growth { color: #8b5cf6; }
+.log-error { color: #ef4444; }
