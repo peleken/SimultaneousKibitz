@@ -37,39 +37,61 @@ js/
   main.js       Bootstrap: constructs GameEngine + GameUI, wires debug buttons
 ```
 
+## 🏗️ Architecture & Core Modules
+
+The engine is built around a strict separation of concerns, ensuring that data, rules, geometry, and presentation remain completely decoupled.
+┌─────────────────┐       ┌─────────────────┐
+│   geometry.js   │       │    state.js     │
+│  (Grid & Math)  │       │  (Data & Log)   │
+└────────┬────────┘       └────────┬────────┘
+         │                         │
+         └──────────┬──────────────┘
+                    │
+           ┌────────▼────────┐
+           │    rules.js     │
+           │(Game Logic Engine)
+           └────────┬────────┘
+                    │
+           ┌────────▼────────┐
+           │     ui.js       │
+           │ (DOM & Canvas)  │
+           └─────────────────┘
 ### Why it's split this way
 
 The guiding principle is that each layer should be usable, and testable,
 without the layers above it:
 
-- **`geometry.js`** would be identical for a completely different game
-  played on the same hex grid. It has no idea a "game" exists.
-- **`state.js`** only holds and copies data (`GameState.clone()`,
-  `.serialize()`). Nothing here decides whether a move is legal or what
-  happens when armies collide — it just describes what the current
-  situation *is*.
-- **`rules.js`** decides things: `GameRules` takes a `GameState` as an
-  explicit argument to every method rather than owning one internally.
-  That means the same `GameRules` instance can resolve turns against
-  any `GameState` you hand it — the real one, a clone, or a hypothetical
-  state built for "what if" evaluation.
-- **`engine.js`** is the only place that knows a `GameState` and a
-  `GameRules` belong together for a given game session. `GameEngine` is
-  the single surface everything else talks to — currently `GameUI`, but
-  it works identically with no DOM present at all (see the "headless"
-  note below).
-- **`render.js`** and **`ui.js`** have zero rules knowledge. They read
-  game data through the `GameEngine` facade and translate clicks into
-  `Order`s, but never resolve a battle or grow a population themselves.
+### Module Breakdown
 
-This split is what makes the state/rules boundary in the TO DO list
-below (headless engine, deterministic simulation, AI testing) tractable
-without rewriting the rules or the UI.
+#### `geometry.js`
+Contains purely mathematical representations of the hexagonal grid (`Tile`, `HexBoard`, `tileKey`). It manages spatial queries (such as neighbor lookups and bounds checking) while remaining entirely unaware of game state, tile ownership, or units. Geometry would be identical for a completely different game played on the same hex grid. It has no idea a "game" exists.
+
+#### `state.js`
+Defines data-only containers (`GameState`, `Player`, `TilePopulation`) and serialization utilities (`clone()`, `serialize()`). Nothing here decides whether a move is legal or what happens when armies collide — it just describes what the current situation *is*.
+
+* **Logging Architecture**: The game logging system (`GameLog` and `NullGameLog`) lives directly within `state.js`.
+  * **`GameLog`**: Stores turn narrative entries alongside visibility arrays (`visibleTo`) to dynamically handle Fog of War visibility per player.
+  * **`NullGameLog`**: A drop-in replacement that discards all log events. This allows AI bots, move validators, or hypothetical simulation runs to execute `resolveTurn()` on cloned states without mutating or cluttering the primary UI event log.
+
+#### `rules.js`
+Holds the core game engine logic (`GameRules`, `ConflictResolver`, `Order`). `GameRules` is stateless; it operates on any given `GameState` instance. It handles:
+* Move validation, order clamping, and order pruning.
+* Step-by-step resolution (civilian relocation, multi-attacker soldier combat, and population growth).
+* Win/loss evaluation.
+
+#### `ui.js`
+Manages canvas rendering, turn flow UI, order panel controls, and DOM events. `GameUI` reads state and triggers engine simulation turns, but never modifies `GameState` properties directly.lop
+
+#### **`render.js`** and **`ui.js`** 
+have zero rules knowledge. They read game data through the `GameEngine` facade and translate clicks into `Order`s, but never resolve a battle or grow a population themselves.
 
 ### GameEngine can already run headless
 
-`GameEngine` has no DOM/canvas dependency at all. From a plain Node
-script (no browser):
+`GameEngine` has no DOM/canvas dependency at all. It's the only place that knows a `GameState` and a `GameRules` belong together for a given game session. `GameEngine` is the single surface everything else talks to — currently `GameUI`, but it works identically with no DOM present at all (see the "headless" note below).
+
+This split is what makes the state/rules boundary in the TO DO list below (headless engine, deterministic simulation, AI testing) tractable without rewriting the rules or the UI.
+
+From a plain Node script (no browser)
 
 ```js
 import { GameEngine } from './js/engine.js';
@@ -125,12 +147,8 @@ of a thrown error.
 
 ## Known bugs
 
-- **Stuck turn on invalid final submission**: if the *last* player to
-  submit has an invalid order, `GameEngine.validateOrders` correctly
-  rejects it and logs the error — but nothing resets `ordersByPlayer`,
-  so there's currently no way to retry that submission short of
-  reloading the page. Not yet fixed; flagged here so it doesn't get
-  lost.
+- When two armies cross, they do not fight. 
+   Currently, if Player 1's army is going North West and Player 2's army in the adjacent North West tile is going South East, the armies cross each other. This is a bug. Both armies should be treated as attacking armies and the surviving army ought to proceed and occupy the destination tile, if the destination contains remaining soldiers, that ought to be treated as a second battle (with an attacker and defender).
 
 ## TO DO
 

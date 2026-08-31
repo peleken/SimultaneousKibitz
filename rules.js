@@ -121,22 +121,108 @@ export class GameRules {
             .map(p => p.id);
     }
 
-    validateOrder(state, order, playerId) {
-        const src = state.population.get(order.from);
-        if (!src || src.ownerId !== playerId) return false;
+    // rules.js
 
+     // rules.js (inside GameRules class)
+
+    /**
+     * 1. Single-order validation check (structural & adjacency rules).
+     */
+    validateOrder(state, order, playerId) {
+        if (!order || order.playerId !== playerId) return false;
+        if (!order.from || !order.to) return false;
+
+        // Check source tile existence and ownership
+        const srcPop = state.population.get(order.from);
+        if (!srcPop || srcPop.ownerId !== playerId) return false;
+
+        // Check neighbor adjacency
         const [q, r] = order.from.split(',').map(Number);
         const [tq, tr] = order.to.split(',').map(Number);
-        const isNeighbor = this.hexBoard.getNeighbors(q, r).some(n => n.q === tq && n.r === tr);
-        if (!isNeighbor) return false;
+        const neighbors = this.hexBoard.getNeighbors(q, r);
 
-        if (order.type === "moveSoldiers") {
-            return order.amount > 0 && src.soldiers >= order.amount;
-        } else if (order.type === "moveCivilians") {
-            const dest = state.population.get(order.to);
-            return order.amount > 0 && src.civilians >= order.amount && dest && dest.ownerId === playerId;
+        return neighbors.some(n => n.q === tq && n.r === tr);
+    }
+
+    /**
+     * 2. Validates, clamps, and prunes an array of orders for a single player.
+     */
+    validateOrders(state, playerOrders, playerId, log) {
+        const validOrders = [];
+        const player = state.getPlayerById(playerId);
+        if (!player || player.isEliminated || !playerOrders) return validOrders;
+
+        const tileBalances = new Map();
+
+        for (const order of playerOrders) {
+            // Step A: Structural validity check
+            if (!this.validateOrder(state, order, playerId)) {
+                log.add(
+                    `⚠️ ${player.name}'s order (${order.type} from ${order.from} to ${order.to}) was invalid and pruned.`,
+                    [playerId],
+                    "error"
+                );
+                continue;
+            }
+
+            const src = state.population.get(order.from);
+            if (!tileBalances.has(order.from)) {
+                tileBalances.set(order.from, {
+                    soldiers: src.soldiers,
+                    civilians: src.civilians
+                });
+            }
+
+            const balance = tileBalances.get(order.from);
+            const isSoldier = order.type === "moveSoldiers";
+            const unitType = isSoldier ? "💂" : "🧑‍🌾";
+            const available = isSoldier ? balance.soldiers : balance.civilians;
+
+            // Step B: Zero balance check
+            if (available <= 0) {
+                log.add(
+                    `⚠️ ${player.name}'s order from ${order.from} to ${order.to} (${order.amount}${unitType}) was pruned: 0 available.`,
+                    [playerId],
+                    "error"
+                );
+                continue;
+            }
+
+            // Step C: Clamping over-allocated amounts
+            let actualAmount = order.amount;
+            if (actualAmount > available) {
+                actualAmount = available;
+                log.add(
+                    `⚠️ ${player.name}'s order from ${order.from} to ${order.to} clamped from ${order.amount}${unitType} to ${actualAmount}${unitType}.`,
+                    [playerId],
+                    "error"
+                );
+            }
+
+            // Deduct from dynamic balance tracker for this turn batch
+            if (isSoldier) balance.soldiers -= actualAmount;
+            else balance.civilians -= actualAmount;
+
+            validOrders.push(
+                new Order(order.type, playerId, order.from, order.to, actualAmount)
+            );
         }
-        return false;
+
+        return validOrders;
+    }
+
+    /**
+     * 3. Sanitizes orders across ALL players prior to turn simulation.
+     */
+    sanitizeOrders(state, ordersByPlayerId, log) {
+        const sanitizedMap = {};
+
+        for (const [playerIdStr, orders] of Object.entries(ordersByPlayerId)) {
+            const playerId = Number(playerIdStr);
+            sanitizedMap[playerId] = this.validateOrders(state, orders, playerId, log);
+        }
+
+        return sanitizedMap;
     }
 
     resolveTurn(state, ordersByPlayerId, log) {
@@ -152,12 +238,24 @@ export class GameRules {
             return inTransit.get(destKey);
         };
 
-        // STEP 1: VALIDATION AND IN-TRANSIT RESERVATION
-        // Deduct units from their source tiles up front so they cannot double-spend or be reused
+        // STEP 1: VALIDATION, CLAMP & PRUNE, AND IN-TRANSIT RESERVATION
+        // Tracks available pool balances dynamically per source tile to prevent over-allocation.
         for (const [playerIdStr, orders] of Object.entries(ordersByPlayerId)) {
             const playerId = Number(playerIdStr);
             const player = state.getPlayerById(playerId);
             if (!player || player.isEliminated) continue;
+
+            // Track remaining unreserved units per tile for this player's turn resolution
+            const tileBalances = new Map();
+            const getBalance = (key, src) => {
+                if (!tileBalances.has(key)) {
+                    tileBalances.set(key, {
+                        soldiers: src.soldiers,
+                        civilians: src.civilians
+                    });
+                }
+                return tileBalances.get(key);
+            };
 
             for (const order of orders) {
                 if (!this.validateOrder(state, order, playerId)) {
@@ -166,8 +264,39 @@ export class GameRules {
                 }
 
                 const src = state.population.get(order.from);
+                const balance = getBalance(order.from, src);
                 const destKey = order.to;
-                const unitType = order.type === "moveSoldiers" ? "💂" : "🧑‍🌾";
+                const isSoldier = order.type === "moveSoldiers";
+                const unitType = isSoldier ? "💂" : "🧑‍🌾";
+                const available = isSoldier ? balance.soldiers : balance.civilians;
+
+                // Option B Pruning: If pool is empty, discard order entirely
+                if (available <= 0) {
+                    log.add(
+                        `⚠️ ${player.name}'s order from ${order.from} to ${destKey} ignored: no remaining ${unitType} available on tile.`,
+                        [playerId],
+                        "error"
+                    );
+                    continue;
+                }
+
+                // Option B Clamping: Cap requested amount to available balance
+                let actualAmount = order.amount;
+                if (actualAmount > available) {
+                    actualAmount = available;
+                    log.add(
+                        `⚠️ ${player.name}'s order from ${order.from} to ${destKey} clamped from ${order.amount}${unitType} to ${actualAmount}${unitType} (insufficient balance).`,
+                        [playerId],
+                        "error"
+                    );
+                }
+
+                // Deduct from temporary local tracking balance
+                if (isSoldier) {
+                    balance.soldiers -= actualAmount;
+                } else {
+                    balance.civilians -= actualAmount;
+                }
 
                 const moveVisibleTo = new Set([
                     ...this.getPlayersWhoCanSee(state, order.from),
@@ -175,19 +304,20 @@ export class GameRules {
                 ]);
 
                 log.add(
-                    `${player.name} moves ${order.amount}${unitType} from ${order.from} to ${destKey}`,
+                    `${player.name} moves ${actualAmount}${unitType} from ${order.from} to ${destKey}`,
                     [...moveVisibleTo],
-                    order.type === "moveSoldiers" ? "attack" : "default"
+                    isSoldier ? "attack" : "default"
                 );
 
                 const transit = getTransitEntry(destKey);
 
-                if (order.type === "moveSoldiers") {
-                    src.soldiers -= order.amount;
-                    transit.attacks.push({ playerId, amount: order.amount });
-                } else if (order.type === "moveCivilians") {
-                    src.civilians -= order.amount;
-                    transit.relocations.push({ playerId, amount: order.amount });
+                // Deduct units from actual state source tile
+                if (isSoldier) {
+                    src.soldiers -= actualAmount;
+                    transit.attacks.push({ playerId, amount: actualAmount });
+                } else {
+                    src.civilians -= actualAmount;
+                    transit.relocations.push({ playerId, amount: actualAmount });
                 }
             }
         }

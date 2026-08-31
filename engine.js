@@ -80,6 +80,10 @@ export class GameEngine {
     getStateSnapshot() {
         return this.state.serialize();
     }
+ 
+    sanitizeOrders(ordersByPlayerId) {
+       return this.rules.sanitizeOrders(this.state, ordersByPlayerId, this.log);
+    }
 
     validateOrders(ordersByPlayerId) {
         const errors = [];

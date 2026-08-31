@@ -133,7 +133,10 @@ export class GameUI {
         };
     }
 
+    // ui.js
+
     submitCurrentPlayerOrders() {
+        console.log("hit");
         this.ordersByPlayer[this.currentPlayer.id] = this.pendingOrders;
         this.pendingOrders = [];
         this.selectedKey = null;
@@ -147,6 +150,7 @@ export class GameUI {
 
         const isLastPlayer = nextIndex >= this.engine.players.length;
 
+        // Pass to next player if round isn't finished
         if (!isLastPlayer) {
             this.currentPlayerIndex = nextIndex;
             this.currentPlayer = this.engine.players[this.currentPlayerIndex];
@@ -156,30 +160,16 @@ export class GameUI {
             return;
         }
 
-        const validation = this.engine.validateOrders(this.ordersByPlayer);
-
-        if (!validation.valid) {
-            for (const error of validation.errors) {
-                this.engine.log.add(`❌ ${error}`, [this.currentPlayer.id], "error");
-            }
-            this.updateLogDisplay();
-            this.render();
-            return;
-        }
-
+        // All players have submitted orders — execute turn resolution
+        // ui.js (inside submitCurrentPlayerOrders)
         try {
-            this.engine.simulateTurn(this.ordersByPlayer);
+            const sanitizedOrders = this.engine.sanitizeOrders(this.ordersByPlayer);
+            this.engine.simulateTurn(sanitizedOrders);
         } catch (err) {
             this.engine.log.add(`❌ Turn resolution failed: ${err.message}`, [this.currentPlayer.id], "error");
-            this.ordersByPlayer = {};
-            this.currentPlayerIndex = 0;
-            this.currentPlayer = this.engine.players[0];
-            this.advanceToActivePlayer();
-            this.updateLogDisplay();
-            this.render();
-            return;
         }
 
+        // Reset turn cycle back to active Player 1
         this.ordersByPlayer = {};
         this.currentPlayerIndex = 0;
         this.currentPlayer = this.engine.players[0];
@@ -237,6 +227,7 @@ export class GameUI {
         this.render();
     }
 
+    // ui.js
     updateOrderInputLimits() {
         if (!this.selectedKey || !this.targetKey) return;
 
@@ -260,8 +251,13 @@ export class GameUI {
 
         const maxCount = this.selectedUnitType === "moveSoldiers" ? avail.soldiers : avail.civilians;
         const input = document.getElementById('unitCountInput');
+        
+        // Clamp max attribute and value to remaining uncommitted balance
         input.max = maxCount;
-        input.value = maxCount > 0 ? 1 : 0;
+        input.value = Math.min(input.value || 1, maxCount);
+        
+        // Disable confirm button if zero units remain
+        document.getElementById('confirmOrderBtn').disabled = (maxCount <= 0);
     }
 
     showOrderPanel() {
