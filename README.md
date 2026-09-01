@@ -61,6 +61,10 @@ The engine is built around a strict separation of concerns, ensuring that data, 
 The guiding principle is that each layer should be usable, and testable,
 without the layers above it:
 
+State = what is
+Rules = what can happen
+Resolution = what happened
+
 ### Module Breakdown
 
 #### `geometry.js`
@@ -161,3 +165,38 @@ of a thrown error.
 - Initial game setup menu — player count/names, map size, fog of war
   toggle, win conditions, starting population.
 - Player registration/login, turn notifications.
+
+- Work towards 
+                    ┌───────────────┐
+                    │   Game State  │
+                    └───────┬───────┘
+                            │
+                     ┌──────▼──────┐
+                     │  Game Rules │
+                     └──────┬──────┘
+                            │
+                     ┌──────▼──────┐
+                     │   Orders    │
+                     └──────┬──────┘
+                            │
+                ┌───────────▼───────────┐
+                │    Turn Resolver      │
+                └───────────┬───────────┘
+                            │
+                   ┌────────▼────────┐
+                   │   Turn Result   │
+                   └────┬─────┬──────┘
+                        │     │
+              ┌─────────┘     └──────────┐
+              ▼                          ▼
+          UI / Replay                  AI
+- Then
+                 Game Simulator
+                       │
+          ┌────────────┼────────────┐
+          ▼            ▼            ▼
+       Player A     Player B     Player C
+          │            │            │
+          └────────────┼────────────┘
+                       ▼
+                  Turn Resolver

@@ -112,31 +112,19 @@ export class GameRules {
         return visible;
     }
 
-    // Returns the player IDs of everyone who can currently see the given
-    // tile (owns it, or owns a neighboring tile). Used to scope log entries
-    // so players don't see events happening under someone else's fog of war.
     getPlayersWhoCanSee(state, targetKey) {
         return state.players
             .filter(p => !p.isEliminated && this.getVisibleTileKeys(state, p).has(targetKey))
             .map(p => p.id);
     }
 
-    // rules.js
-
-     // rules.js (inside GameRules class)
-
-    /**
-     * 1. Single-order validation check (structural & adjacency rules).
-     */
     validateOrder(state, order, playerId) {
         if (!order || order.playerId !== playerId) return false;
         if (!order.from || !order.to) return false;
 
-        // Check source tile existence and ownership
         const srcPop = state.population.get(order.from);
         if (!srcPop || srcPop.ownerId !== playerId) return false;
 
-        // Check neighbor adjacency
         const [q, r] = order.from.split(',').map(Number);
         const [tq, tr] = order.to.split(',').map(Number);
         const neighbors = this.hexBoard.getNeighbors(q, r);
@@ -144,9 +132,6 @@ export class GameRules {
         return neighbors.some(n => n.q === tq && n.r === tr);
     }
 
-    /**
-     * 2. Validates, clamps, and prunes an array of orders for a single player.
-     */
     validateOrders(state, playerOrders, playerId, log) {
         const validOrders = [];
         const player = state.getPlayerById(playerId);
@@ -155,7 +140,6 @@ export class GameRules {
         const tileBalances = new Map();
 
         for (const order of playerOrders) {
-            // Step A: Structural validity check
             if (!this.validateOrder(state, order, playerId)) {
                 log.add(
                     `⚠️ ${player.name}'s order (${order.type} from ${order.from} to ${order.to}) was invalid and pruned.`,
@@ -178,7 +162,6 @@ export class GameRules {
             const unitType = isSoldier ? "💂" : "🧑‍🌾";
             const available = isSoldier ? balance.soldiers : balance.civilians;
 
-            // Step B: Zero balance check
             if (available <= 0) {
                 log.add(
                     `⚠️ ${player.name}'s order from ${order.from} to ${order.to} (${order.amount}${unitType}) was pruned: 0 available.`,
@@ -188,7 +171,6 @@ export class GameRules {
                 continue;
             }
 
-            // Step C: Clamping over-allocated amounts
             let actualAmount = order.amount;
             if (actualAmount > available) {
                 actualAmount = available;
@@ -199,7 +181,6 @@ export class GameRules {
                 );
             }
 
-            // Deduct from dynamic balance tracker for this turn batch
             if (isSoldier) balance.soldiers -= actualAmount;
             else balance.civilians -= actualAmount;
 
@@ -211,9 +192,6 @@ export class GameRules {
         return validOrders;
     }
 
-    /**
-     * 3. Sanitizes orders across ALL players prior to turn simulation.
-     */
     sanitizeOrders(state, ordersByPlayerId, log) {
         const sanitizedMap = {};
 
@@ -228,7 +206,6 @@ export class GameRules {
     resolveTurn(state, ordersByPlayerId, log) {
         if (state.isGameOver) return;
 
-        // Structure: destKey -> { relocations: [{ playerId, amount }], attacks: [{ playerId, amount }] }
         const inTransit = new Map();
 
         const getTransitEntry = (destKey) => {
@@ -238,14 +215,97 @@ export class GameRules {
             return inTransit.get(destKey);
         };
 
-        // STEP 1: VALIDATION, CLAMP & PRUNE, AND IN-TRANSIT RESERVATION
-        // Tracks available pool balances dynamically per source tile to prevent over-allocation.
+        // STEP 0: DETECT AND RESOLVE CROSSING ARMIES
+        const allSoldierOrders = [];
+        for (const [playerIdStr, orders] of Object.entries(ordersByPlayerId)) {
+            const playerId = Number(playerIdStr);
+            for (const order of orders) {
+                if (order.type === "moveSoldiers" && this.validateOrder(state, order, playerId)) {
+                    allSoldierOrders.push({ playerId, order });
+                }
+            }
+        }
+
+        const orderMap = new Map();
+        for (const { playerId, order } of allSoldierOrders) {
+            const key = `${order.from},${order.to}`;
+            if (!orderMap.has(key)) {
+                orderMap.set(key, []);
+            }
+            orderMap.get(key).push({ playerId, order });
+        }
+
+        const crossingResults = new Map();
+        const processedPairs = new Set();
+
+        for (const { playerId: playerIdA, order: orderA } of allSoldierOrders) {
+            const reverseKey = `${orderA.to},${orderA.from}`;
+            const reverseOrders = orderMap.get(reverseKey) || [];
+
+            for (const { playerId: playerIdB, order: orderB } of reverseOrders) {
+                if (playerIdA === playerIdB) continue;
+
+                const pairKey = `${orderA.from},${orderA.to},${playerIdA},${playerIdB}`;
+                const reversePairKey = `${orderB.from},${orderB.to},${playerIdB},${playerIdA}`;
+
+                if (processedPairs.has(pairKey) || processedPairs.has(reversePairKey)) continue;
+                processedPairs.add(pairKey);
+
+                const srcA = state.population.get(orderA.from);
+                const srcB = state.population.get(orderB.from);
+                if (!srcA || !srcB) continue;
+
+                const availableA = Math.min(orderA.amount, srcA.soldiers);
+                const availableB = Math.min(orderB.amount, srcB.soldiers);
+
+                if (availableA === 0 || availableB === 0) {
+                    crossingResults.set(`${orderA.from},${orderA.to},${playerIdA}`, 0);
+                    crossingResults.set(`${orderB.from},${orderB.to},${playerIdB}`, 0);
+                    continue;
+                }
+
+                const attackerA = { playerId: playerIdA, amount: availableA };
+                const attackerB = { playerId: playerIdB, amount: availableB };
+
+                const visibleTo = new Set([
+                    ...this.getPlayersWhoCanSee(state, orderA.from),
+                    ...this.getPlayersWhoCanSee(state, orderA.to)
+                ]);
+
+                const playerAName = state.getPlayerById(playerIdA).name;
+                const playerBName = state.getPlayerById(playerIdB).name;
+
+                log.add(
+                    `⚔️ CROSSING: ${playerAName}'s ${availableA}💂 and ${playerBName}'s ${availableB}💂 cross paths between ${orderA.from} and ${orderA.to}!`,
+                    [...visibleTo],
+                    "attack"
+                );
+
+                const result = this.conflictResolver.resolve([attackerA, attackerB], null);
+
+                if (result.winnerId === playerIdA) {
+                    crossingResults.set(`${orderA.from},${orderA.to},${playerIdA}`, result.survivingSoldiers);
+                    crossingResults.set(`${orderB.from},${orderB.to},${playerIdB}`, 0);
+                } else {
+                    crossingResults.set(`${orderA.from},${orderA.to},${playerIdA}`, 0);
+                    crossingResults.set(`${orderB.from},${orderB.to},${playerIdB}`, result.survivingSoldiers);
+                }
+
+                const winnerName = state.getPlayerById(result.winnerId).name;
+                log.add(
+                    `🏆 ${winnerName} wins the crossing battle with ${result.survivingSoldiers}💂 surviving`,
+                    [...visibleTo],
+                    "victory"
+                );
+            }
+        }
+
+                // STEP 1: VALIDATION, CLAMP & PRUNE, AND IN-TRANSIT RESERVATION
         for (const [playerIdStr, orders] of Object.entries(ordersByPlayerId)) {
             const playerId = Number(playerIdStr);
             const player = state.getPlayerById(playerId);
             if (!player || player.isEliminated) continue;
 
-            // Track remaining unreserved units per tile for this player's turn resolution
             const tileBalances = new Map();
             const getBalance = (key, src) => {
                 if (!tileBalances.has(key)) {
@@ -270,7 +330,24 @@ export class GameRules {
                 const unitType = isSoldier ? "💂" : "🧑‍🌾";
                 const available = isSoldier ? balance.soldiers : balance.civilians;
 
-                // Option B Pruning: If pool is empty, discard order entirely
+                // Check if this soldier order was part of a crossing battle
+                let actualAmount = order.amount;
+                if (isSoldier) {
+                    const crossingKey = `${order.from},${order.to},${playerId}`;
+                    const crossingSurvivors = crossingResults.get(crossingKey);
+                    if (crossingSurvivors !== undefined) {
+                        if (crossingSurvivors === 0) {
+                            log.add(
+                                `⚠️ ${player.name}'s order from ${order.from} to ${destKey} cancelled: all soldiers died in crossing battle.`,
+                                [playerId],
+                                "error"
+                            );
+                            continue;
+                        }
+                        actualAmount = Math.min(crossingSurvivors, available);
+                    }
+                }
+
                 if (available <= 0) {
                     log.add(
                         `⚠️ ${player.name}'s order from ${order.from} to ${destKey} ignored: no remaining ${unitType} available on tile.`,
@@ -280,8 +357,6 @@ export class GameRules {
                     continue;
                 }
 
-                // Option B Clamping: Cap requested amount to available balance
-                let actualAmount = order.amount;
                 if (actualAmount > available) {
                     actualAmount = available;
                     log.add(
@@ -291,7 +366,6 @@ export class GameRules {
                     );
                 }
 
-                // Deduct from temporary local tracking balance
                 if (isSoldier) {
                     balance.soldiers -= actualAmount;
                 } else {
@@ -311,7 +385,6 @@ export class GameRules {
 
                 const transit = getTransitEntry(destKey);
 
-                // Deduct units from actual state source tile
                 if (isSoldier) {
                     src.soldiers -= actualAmount;
                     transit.attacks.push({ playerId, amount: actualAmount });
