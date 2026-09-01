@@ -1,9 +1,9 @@
-import { GameEngine } from './engine.js';
+import { createGame } from './game.js';
 import { GameUI } from './ui.js';
 
 window.addEventListener('DOMContentLoaded', () => {
     const canvas = document.getElementById('gameCanvas');
-    const engine = new GameEngine();
+    const { engine } = createGame();
     const ui = new GameUI(canvas, engine);
 
     document.getElementById('showStateBtn').addEventListener('click', () => {

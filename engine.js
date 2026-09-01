@@ -1,51 +1,119 @@
-/*
- * engine.js
+import { normalizeOrders } from "./orders.js";
+import { OrderValidator } from "./validation.js";
+import { TurnResolver } from "./resolution.js";
+import { tileKey, parseTileKey } from "./geometry.js";
+
+/**
+ * Public boundary for simulation.
  *
- * GameEngine is the ONLY thing that knows a GameState and a GameRules
- * instance go together. It owns both, plus the log, and is the single
- * surface everything else (GameUI today; an AI harness or server
- * endpoint later) talks to.
+ * The engine is intentionally unaware of the DOM/canvas. A server, UI,
+ * replay system, or AI can all call the same methods.
  *
- * simulateTurn() ALWAYS validates internally before resolving, even
- * though GameUI also validates up front (so it can show a friendly
- * in-log error instead of catching an exception). This means any other
- * future caller can't accidentally corrupt game state by skipping
- * validation.
+ * It also exposes a small compatibility facade -- players, population,
+ * hexBoard, log, getVisibleTileKeys(), getPlayerById(), sanitizeOrders(),
+ * and state.isGameOver/winnerId/player.isEliminated -- because GameUI
+ * (which predates this split) reads all of these directly off the engine
+ * instead of reaching into resolver/validator internals. GameUI never
+ * mutates state itself; every change still goes through simulateTurn().
  */
 
-import { HexBoard } from './geometry.js';
-import { GameState, GameLog, Player } from './state.js';
-import { GameRules, ConflictResolver } from './rules.js';
-
-export class GameEngine {
+class GameLog {
     constructor() {
-        this.hexBoard = new HexBoard(2);
-        this.conflictResolver = new ConflictResolver();
-        this.rules = new GameRules(this.hexBoard, this.conflictResolver);
-
-        const players = [
-            new Player(1, "Player 1", "#b91c1c", 0),  // Red
-            new Player(2, "Player 2", "#1d4ed8", 0)   // Blue
-        ];
-        this.state = new GameState(players, new Map(), 0);
-        this.log = new GameLog();
-
-        this.rules.setupStartingTiles(this.state, this.log);
+        this.entries = [];
     }
 
-    // Convenience accessors so callers (mainly GameUI) can read
-    // this.engine.players / .population without reaching through
-    // this.engine.state every time. These are read-only views onto
-    // state -- the engine still owns the one authoritative GameState.
+    add(message, visibleTo = [], type = "default") {
+        this.entries.push({ message, visibleTo, type, turn: this.entries.length });
+    }
+
+    getPlayerLog(playerId) {
+        return this.entries.filter(e => !e.visibleTo.length || e.visibleTo.includes(playerId));
+    }
+}
+
+export class GameEngine {
+    constructor({
+        state,
+        board,
+        validator = new OrderValidator(board),
+        resolver = new TurnResolver()
+    }) {
+        this.state = state;
+        this.board = board;
+        this.validator = validator;
+        this.resolver = resolver;
+
+        this.log = new GameLog();
+
+        // The decoupled GameState (state.js) only tracks players/population/
+        // turn -- it deliberately doesn't know about game-over or elimination,
+        // since those are derived facts, not raw state. The facade computes
+        // and attaches them here so existing readers keep working.
+        this.state.isGameOver = false;
+        this.state.winnerId = null;
+        for (const player of this.state.players) {
+            player.isEliminated = false;
+        }
+    }
+
     get players() { return this.state.players; }
     get population() { return this.state.population; }
+    get hexBoard() { return this.board; }
 
     getPlayerById(id) {
         return this.state.getPlayerById(id);
     }
 
     getVisibleTileKeys(player) {
-        return this.rules.getVisibleTileKeys(this.state, player);
+        const visible = new Set();
+
+        for (const [key, pop] of this.state.population) {
+            if (pop.ownerId !== player.id) continue;
+
+            visible.add(key);
+
+            const { q, r } = parseTileKey(key);
+            for (const n of this.board.getNeighbors(q, r)) {
+                visible.add(tileKey(n.q, n.r));
+            }
+        }
+
+        return visible;
+    }
+
+    validateOrders(ordersByPlayerId) {
+        const normalized = normalizeOrders(
+            ordersByPlayerId,
+            this.state.players
+        );
+
+        return this.validator.validate(this.state, normalized);
+    }
+
+    // The old GameRules.sanitizeOrders() dropped individually-invalid
+    // orders (logging why) instead of rejecting the whole turn, so GameUI
+    // can show a friendly per-order log line rather than catch a thrown
+    // error from simulateTurn().
+    sanitizeOrders(ordersByPlayerId) {
+        const sanitized = {};
+
+        for (const player of this.state.players) {
+            const orders = ordersByPlayerId[player.id] || [];
+            const kept = [];
+
+            for (const order of orders) {
+                const result = this.validator.validateOrder(this.state, order, player.id);
+                if (result.valid) {
+                    kept.push(order);
+                } else {
+                    this.log.add(`❌ ${player.name}: ${result.error}`, [player.id], "error");
+                }
+            }
+
+            sanitized[player.id] = kept;
+        }
+
+        return sanitized;
     }
 
     simulateTurn(ordersByPlayerId) {
@@ -53,86 +121,75 @@ export class GameEngine {
             throw new Error("Game is already over.");
         }
 
-        const normalizedOrders = {};
+        const normalized = normalizeOrders(
+            ordersByPlayerId,
+            this.state.players
+        );
 
-        for (const player of this.state.players) {
-            const orders = ordersByPlayerId[player.id] || [];
+        const validation = this.validator.validate(
+            this.state,
+            normalized
+        );
 
-            if (!Array.isArray(orders)) {
-                throw new Error(`Orders for ${player.name} must be an array.`);
-            }
-
-            normalizedOrders[player.id] = orders;
-        }
-
-        const validation = this.validateOrders(normalizedOrders);
         if (!validation.valid) {
             throw new Error(
-                `simulateTurn() called with invalid orders:\n- ${validation.errors.join('\n- ')}`
+                `Cannot resolve invalid orders:\n${validation.errors.join("\n")}`
             );
         }
 
-        this.rules.resolveTurn(this.state, normalizedOrders, this.log);
+        const result = this.resolver.resolve(
+            this.state,
+            normalized
+        );
 
-        return this.getStateSnapshot();
+        this.state = result.state;
+        this.state.isGameOver = result.gameOver;
+        this.state.winnerId = result.winnerId;
+
+        for (const player of this.state.players) {
+            player.isEliminated = ![...this.state.population.values()].some(
+                pop => pop.ownerId === player.id &&
+                       (pop.soldiers > 0 || pop.civilians > 0 || pop.babies > 0)
+            );
+        }
+
+        for (const event of result.events) {
+            this.log.add(...this.describeEvent(event));
+        }
+
+        return result;
+    }
+
+    describeEvent(event) {
+        const visibleTo = event.visibleTo ?? [];
+
+        switch (event.type) {
+            case "movement":
+                return [`Player ${event.playerId} moves ${event.amount} 💂 from ${event.from} to ${event.to}`, visibleTo, "default"];
+            case "civilianMovement":
+                return [`Player ${event.playerId} relocates ${event.amount} 🧑‍🌾 from ${event.from} to ${event.to}`, visibleTo, "default"];
+            case "edgeBattle":
+                return [`⚔️ Armies crossing paths near ${event.from}/${event.to} clash — Player ${event.winnerId} wins with ${event.survivingSoldiers} soldiers remaining`, visibleTo, "attack"];
+            case "reinforcement":
+                return [`Player ${event.playerId} reinforces ${event.destination} with ${event.amount} 💂`, visibleTo, "default"];
+            case "battle": {
+                const outcome = event.captured ? "captures" : "holds";
+                return [`⚔️ Battle at ${event.destination} — Player ${event.winnerId} ${outcome} it with ${event.survivingSoldiers} soldiers remaining`, visibleTo, event.captured ? "victory" : "defend"];
+            }
+            case "growth":
+                return [`Player ${event.playerId} grows population by ${event.amount}`, visibleTo, "growth"];
+            case "victory":
+                return [`🏆 Player ${event.playerId} wins the game!`, visibleTo, "victory"];
+            default:
+                return [JSON.stringify(event), visibleTo, "default"];
+        }
     }
 
     getStateSnapshot() {
         return this.state.serialize();
     }
- 
-    sanitizeOrders(ordersByPlayerId) {
-       return this.rules.sanitizeOrders(this.state, ordersByPlayerId, this.log);
-    }
 
-    validateOrders(ordersByPlayerId) {
-        const errors = [];
-
-        for (const player of this.state.players) {
-            if (player.isEliminated) continue;
-
-            const orders = ordersByPlayerId[player.id] || [];
-            const committed = new Map();
-
-            for (const order of orders) {
-                if (order.playerId !== player.id) {
-                    errors.push(`${player.name}: order contains the wrong player ID.`);
-                    continue;
-                }
-
-                if (!this.rules.validateOrder(this.state, order, player.id)) {
-                    errors.push(
-                        `${player.name}: invalid ${order.type} from ${order.from} ` +
-                        `to ${order.to} (${order.amount}).`
-                    );
-                    continue;
-                }
-
-                const key = `${order.from}:${order.type}`;
-                committed.set(key, (committed.get(key) || 0) + order.amount);
-            }
-
-            for (const [commitKey, amount] of committed) {
-                const [from, type] = commitKey.split(":");
-                const pop = this.state.population.get(from);
-                if (!pop) continue;
-
-                const available = type === "moveSoldiers"
-                    ? pop.soldiers
-                    : pop.civilians;
-
-                if (amount > available) {
-                    errors.push(
-                        `${player.name}: submitted ${amount} units from ${from}, ` +
-                        `but only ${available} are available.`
-                    );
-                }
-            }
-        }
-
-        return {
-            valid: errors.length === 0,
-            errors
-        };
+    getState() {
+        return this.state;
     }
 }

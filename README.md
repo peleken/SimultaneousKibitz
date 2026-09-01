@@ -1,202 +1,273 @@
-# Simultaneous Kibitz
+# Simultaneous Kibitz — Refactored Prototype
 
-A prototype hex-grid strategy game: players grow population on hex tiles,
-split growth between civilians and soldiers, and fight over territory
-using simultaneous, blind turn submission (all players submit orders,
-then the engine resolves everything at once).
+## Architecture
 
-## Running it
-
-This project uses ES modules (`import`/`export`), so it must be served
-over HTTP — opening `index.html` directly as a `file://` URL will fail
-due to browser CORS restrictions on module imports.
-
-From this directory, any static file server works, for example:
-
-```bash
-python3 -m http.server 8000
-# or
-npx serve .
+```text
+geometry.js
+    ↓
+state.js
+    ↓
+orders.js
+    ↓
+validation.js
+    ↓
+resolution.js
+    ├── movement.js
+    ├── combat.js
+    ├── growth.js
+    └── victory.js
+    ↓
+engine.js
 ```
 
-Then open `http://localhost:8000` (or whatever port/URL your server
-gives you) in a browser.
+`index.html` contains only the prototype UI/renderer and calls the engine.
 
-## Project structure
+## Important movement rule
 
-```
-index.html      DOM skeleton only — no styles or logic
-style.css       All styling
-js/
-  geometry.js   Tile, HexBoard — pure hex-grid math, no rules or ownership
-  state.js      Player, TilePopulation, GameLog, GameState — pure data, no rules
-  rules.js      Order, ConflictResolver, GameRules — all turn-resolution logic
-  engine.js     GameEngine — owns the one authoritative GameState + GameRules pair
-  render.js     BoardRenderer — canvas drawing only, no rules knowledge
-  ui.js         GameUI — DOM/canvas interaction only, talks to GameEngine
-  main.js       Bootstrap: constructs GameEngine + GameUI, wires debug buttons
+Soldier movement is treated as simultaneous.
+
+Every soldier order is first removed from its source tile. Arrivals are then resolved together.
+
+A reciprocal pair such as:
+
+```text
+A → B
+B → A
 ```
 
-## 🏗️ Architecture & Core Modules
+is detected as an **edge battle**. The armies engage instead of passing through one another. The winner proceeds into the destination it originally intended to enter.
 
-The engine is built around a strict separation of concerns, ensuring that data, rules, geometry, and presentation remain completely decoupled.
-┌─────────────────┐       ┌─────────────────┐
-│   geometry.js   │       │    state.js     │
-│  (Grid & Math)  │       │  (Data & Log)   │
-└────────┬────────┘       └────────┬────────┘
-         │                         │
-         └──────────┬──────────────┘
-                    │
-           ┌────────▼────────┐
-           │    rules.js     │
-           │(Game Logic Engine)
-           └────────┬────────┘
-                    │
-           ┌────────▼────────┐
-           │     ui.js       │
-           │ (DOM & Canvas)  │
-           └─────────────────┘
-### Why it's split this way
+This is deliberately explicit rather than relying on the order in which JavaScript happens to process the orders.
 
-The guiding principle is that each layer should be usable, and testable,
-without the layers above it:
+## Determinism
 
-State = what is
-Rules = what can happen
-Resolution = what happened
-
-### Module Breakdown
-
-#### `geometry.js`
-Contains purely mathematical representations of the hexagonal grid (`Tile`, `HexBoard`, `tileKey`). It manages spatial queries (such as neighbor lookups and bounds checking) while remaining entirely unaware of game state, tile ownership, or units. Geometry would be identical for a completely different game played on the same hex grid. It has no idea a "game" exists.
-
-#### `state.js`
-Defines data-only containers (`GameState`, `Player`, `TilePopulation`) and serialization utilities (`clone()`, `serialize()`). Nothing here decides whether a move is legal or what happens when armies collide — it just describes what the current situation *is*.
-
-* **Logging Architecture**: The game logging system (`GameLog` and `NullGameLog`) lives directly within `state.js`.
-  * **`GameLog`**: Stores turn narrative entries alongside visibility arrays (`visibleTo`) to dynamically handle Fog of War visibility per player.
-  * **`NullGameLog`**: A drop-in replacement that discards all log events. This allows AI bots, move validators, or hypothetical simulation runs to execute `resolveTurn()` on cloned states without mutating or cluttering the primary UI event log.
-
-#### `rules.js`
-Holds the core game engine logic (`GameRules`, `ConflictResolver`, `Order`). `GameRules` is stateless; it operates on any given `GameState` instance. It handles:
-* Move validation, order clamping, and order pruning.
-* Step-by-step resolution (civilian relocation, multi-attacker soldier combat, and population growth).
-* Win/loss evaluation.
-
-#### `ui.js`
-Manages canvas rendering, turn flow UI, order panel controls, and DOM events. `GameUI` reads state and triggers engine simulation turns, but never modifies `GameState` properties directly.lop
-
-#### **`render.js`** and **`ui.js`** 
-have zero rules knowledge. They read game data through the `GameEngine` facade and translate clicks into `Order`s, but never resolve a battle or grow a population themselves.
-
-### GameEngine can already run headless
-
-`GameEngine` has no DOM/canvas dependency at all. It's the only place that knows a `GameState` and a `GameRules` belong together for a given game session. `GameEngine` is the single surface everything else talks to — currently `GameUI`, but it works identically with no DOM present at all (see the "headless" note below).
-
-This split is what makes the state/rules boundary in the TO DO list below (headless engine, deterministic simulation, AI testing) tractable without rewriting the rules or the UI.
-
-From a plain Node script (no browser)
+`ConflictResolver` accepts an injected random function:
 
 ```js
-import { GameEngine } from './js/engine.js';
-
-const engine = new GameEngine();
-const snapshot = engine.simulateTurn({
-    1: [/* Order objects for player 1 */],
-    2: [/* Order objects for player 2 */]
-});
-console.log(snapshot); // JSON-serializable game state
+new ConflictResolver(() => seededRandom());
 ```
 
-`simulateTurn()` validates orders internally and throws on anything
-illegal, so it's safe to call from code that hasn't validated up front
-(an AI harness, a script, a server endpoint) — `GameUI` also validates
-before calling it, purely so players get a friendly log message instead
-of a thrown error.
+The current UI uses `Math.random`, but the simulation layer no longer requires it. A seeded RNG can therefore be added without changing game rules.
 
-## Game rules (current)
+## Suggested next step
 
-**Starting setup**
-- Each player starts with 1 tile, 2 civilians, and 1 baby.
-- Players can see the tile they own and all adjacent tiles (fog of war
-  elsewhere).
+Add automated tests around `TurnResolver`, especially:
 
-**Each turn**
-- Players adjust their civilian/soldier growth ratio via slider.
-- Players can move soldiers onto an adjacent tile to attack or
-  reinforce it.
-- Players can move civilians onto an adjacent *friendly* tile to
-  relocate population.
-- All players submit simultaneously; nothing resolves until everyone
-  has submitted.
+- reciprocal movement
+- two attackers entering one tile
+- three attackers entering one tile
+- attack against a tile whose defender is simultaneously leaving
+- reinforcement plus attack
+- civilian movement during combat
+- capture and civilian/baby loss
+- deterministic seeded combat
 
-**Turn resolution order**
-1. **Validate & reserve** — every order is checked against current
-   state, and units are pulled into an in-transit pool up front so they
-   can't be double-spent or reused within the same turn.
-2. **Movement & relocation** — civilian relocations are applied to
-   friendly destination tiles.
-3. **Conflict resolution** — soldiers arriving on a tile either
-   reinforce (same owner) or fight (different owner), via dice rolls:
-   - Owned tiles: the defender gets an advantage.
-   - Unowned tiles: the larger army gets an advantage.
-   - Ties are re-rolled.
-   - Losing a tile kills any civilians/babies present on it.
-4. **Population growth** — babies mature into civilians/soldiers per
-   the owning player's ratio; new babies are generated (1 per 2
-   civilians).
-5. **Win condition check** — a player with no tiles or no units left is
-   eliminated; the last player standing wins (or it's a draw if
-   everyone is wiped out simultaneously).
+Player owns tile → sees tile
+Player owns tile → sees all adjacent tiles
+Player doesn't own tile → doesn't see it
+Moving into an adjacent enemy tile is legal
+Moving into a non-adjacent tile is illegal
+Units can't exceed available population
+Multiple players can issue orders simultaneously
+Orders resolve simultaneously rather than sequentially
+Combat produces the expected winner
+Tie-breaking works according to the rules we just designed
+Eliminated players don't get turns
+Victory/game-over conditions work
 
-## Known bugs
 
-- When two armies cross, they do not fight. 
-   Currently, if Player 1's army is going North West and Player 2's army in the adjacent North West tile is going South East, the armies cross each other. This is a bug. Both armies should be treated as attacking armies and the surviving army ought to proceed and occupy the destination tile, if the destination contains remaining soldiers, that ought to be treated as a second battle (with an attacker and defender).
+  ┌──────────────┐
+             │   Game UI    │
+             └──────┬───────┘
+                    │
+             creates orders
+                    ↓
+             ┌──────────────┐
+             │ Game Engine  │
+             └──────┬───────┘
+                    │
+              submits orders
+                    ↓
+             ┌──────────────┐
+             │   Resolver   │
+             └──────┬───────┘
+                    │
+          ┌─────────┼─────────┐
+          ↓         ↓         ↓
+       Movement   Combat    Growth
+          │         │         │
+          └─────────┼─────────┘
+                    ↓
+               Game State
 
-## TO DO
+The really important conceptual distinction I'd preserve is:
 
-- Replace `Math.random` with a deterministic random seed (needed for
-  reproducible simulations/replays).
-- Make the game engine headless — mostly already true; see above.
-- Support simulating multiple headless games in a batch.
-- AI/LLM testing harness (paste a turn request as JSON, paste back an
-  AI's response).
-- Initial game setup menu — player count/names, map size, fog of war
-  toggle, win conditions, starting population.
-- Player registration/login, turn notifications.
+The engine orchestrates the game; the rules determine what happens.
 
-- Work towards 
-                    ┌───────────────┐
-                    │   Game State  │
-                    └───────┬───────┘
-                            │
-                     ┌──────▼──────┐
-                     │  Game Rules │
-                     └──────┬──────┘
-                            │
-                     ┌──────▼──────┐
-                     │   Orders    │
-                     └──────┬──────┘
-                            │
-                ┌───────────▼───────────┐
-                │    Turn Resolver      │
-                └───────────┬───────────┘
-                            │
-                   ┌────────▼────────┐
-                   │   Turn Result   │
-                   └────┬─────┬──────┘
-                        │     │
-              ┌─────────┘     └──────────┐
-              ▼                          ▼
-          UI / Replay                  AI
-- Then
-                 Game Simulator
-                       │
-          ┌────────────┼────────────┐
-          ▼            ▼            ▼
-       Player A     Player B     Player C
-          │            │            │
-          └────────────┼────────────┘
-                       ▼
-                  Turn Resolver
+3. Make orders first-class objects
+
+This is probably the next architectural feature I'd actually implement.
+
+Instead of thinking:
+
+"Player clicked this tile, so move 3 soldiers."
+
+Think:
+
+Order {
+    playerId,
+    type,
+    from,
+    to,
+    amount
+}
+
+Then the entire turn becomes something like:
+
+[
+    Order(...),
+    Order(...),
+    Order(...),
+    Order(...)
+]
+
+And the resolver doesn't care whether those orders came from:
+
+the browser
+an AI
+a network client
+a test
+a replay
+
+---
+
+1. Collect orders
+        ↓
+2. Validate orders
+        ↓
+3. Resolve movement
+        ↓
+4. Identify conflicts
+        ↓
+5. Resolve conflicts
+        ↓
+6. Apply casualties
+        ↓
+7. Apply population growth
+        ↓
+8. Check eliminations
+        ↓
+9. Check victory
+        ↓
+10. Produce next state
+
+A turn-resolution log
+
+Rather than the UI having to infer what happened, have the engine produce something like:
+
+{
+    movement: [...],
+    conflicts: [...],
+    casualties: [...],
+    captures: [...],
+    growth: [...],
+    eliminations: [...],
+    winner: null
+}
+
+Then:
+
+Engine
+   │
+   ├── new GameState
+   │
+   └── TurnResult
+           │
+           ↓
+          UI
+
+This is a really powerful separation.
+
+The UI can turn that result into:
+
+🔴 Player 1 attacked Blueville with 8 soldiers.
+
+⚔️ Three armies entered the conflict.
+
+🎲 Player 2 won the battle.
+
+🔵 Player 2 captured Blueville.
+
+But the engine doesn't need to know anything about how those messages are displayed.
+
+It also gives you the beginnings of replays, which I suspect could be particularly fun for this game.
+
+Then I'd start working on the actual game
+
+Once those foundations are tested, I'd move toward the stuff that makes Kibitz interesting.
+
+I'd roughly prioritize:
+
+Priority	Feature
+⭐⭐⭐⭐⭐	Automated engine tests
+⭐⭐⭐⭐⭐	Robust turn-resolution pipeline
+⭐⭐⭐⭐	First-class orders
+⭐⭐⭐⭐	Turn-resolution events/log
+⭐⭐⭐⭐	Fog-of-war/visibility rules
+⭐⭐⭐	Combat balancing
+⭐⭐⭐	AI players
+⭐⭐⭐	Better UI
+⭐⭐	Animation
+⭐⭐	Multiplayer/networking
+
+And AI becomes much easier once the engine is clean.
+
+An AI player should eventually be able to do:
+
+const orders = ai.generateOrders(engine.getStateForPlayer(player));
+
+engine.submitOrders(player, orders);
+
+without importing a single UI module.
+
+That's a very satisfying architectural endpoint.
+
+One thing I'd not do yet
+
+Don't get too ambitious with networking.
+
+The fact that you're designing a simultaneous-order game makes multiplayer tempting, but I'd get the deterministic single-machine simulation rock solid first.
+
+Ideally:
+
+const initialState = ...
+const orders = ...
+const result = engine.simulateTurn(initialState, orders)
+
+is deterministic given a supplied RNG.
+
+Then networking becomes substantially easier later.
+
+If this were my project...
+
+My next commit would probably be:
+
+test-turn-resolution
+
+and I'd build a deliberately boring suite of tests around the engine.
+
+Then:
+
+refactor-turn-resolution
+
+to make the phases explicit.
+
+Then:
+
+turn-events
+
+to make the UI consume resolution results rather than knowing how the rules work.
+
+After that I'd start adding gameplay.
+
+You've just crossed an important threshold: the code is now becoming a game engine rather than an HTML game with a lot of game logic in it. That's worth exploiting.

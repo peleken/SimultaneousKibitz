@@ -3,13 +3,12 @@
  *
  * GameUI owns the DOM/canvas interaction and nothing else. It never
  * mutates game state directly -- every state change goes through
- * engine.simulateTurn(). It reads from the engine facade (engine.players,
- * engine.population, engine.state, engine.log, ...) but makes no rules
- * decisions of its own.
+ * engine.simulateTurn(). It reads from the engine facade but makes no
+ * rules decisions of its own.
  */
 
 import { BoardRenderer } from './render.js';
-import { Order } from './rules.js';
+import { Order } from './orders.js';
 
 export class GameUI {
     constructor(canvas, engine) {
@@ -32,7 +31,11 @@ export class GameUI {
     }
 
     advanceToActivePlayer() {
-        while (this.currentPlayer && this.currentPlayer.isEliminated && !this.engine.state.isGameOver) {
+        while (
+            this.currentPlayer &&
+            this.currentPlayer.isEliminated &&
+            !this.engine.state.isGameOver
+        ) {
             this.currentPlayerIndex++;
             if (this.currentPlayerIndex >= this.engine.players.length) {
                 this.currentPlayerIndex = 0;
@@ -83,14 +86,26 @@ export class GameUI {
         document.getElementById('confirmOrderBtn').addEventListener('click', () => {
             const countInput = document.getElementById('unitCountInput');
             const amount = parseInt(countInput.value, 10);
+
             if (amount > 0 && this.selectedKey && this.targetKey) {
-                const order = new Order(this.selectedUnitType, this.currentPlayer.id, this.selectedKey, this.targetKey, amount);
+                const order = new Order(
+                    this.selectedUnitType,
+                    this.currentPlayer.id,
+                    this.selectedKey,
+                    this.targetKey,
+                    amount
+                );
+
                 this.pendingOrders.push(order);
+
                 this.engine.log.add(
-                    `${this.currentPlayer.name} orders ${amount} ${this.selectedUnitType === 'moveSoldiers' ? '💂' : '🧑‍🌾'} from ${this.selectedKey} to ${this.targetKey}`,
+                    `${this.currentPlayer.name} orders ${amount} ` +
+                    `${this.selectedUnitType === 'moveSoldiers' ? '💂' : '🧑‍🌾'} ` +
+                    `from ${this.selectedKey} to ${this.targetKey}`,
                     [this.currentPlayer.id],
                     "default"
                 );
+
                 this.updateLogDisplay();
                 this.selectedKey = null;
                 this.targetKey = null;
@@ -120,11 +135,10 @@ export class GameUI {
         let committedSoldiers = 0;
         let committedCivilians = 0;
 
-        for (const o of this.pendingOrders) {
-            if (o.from === tileKey) {
-                if (o.type === "moveSoldiers") committedSoldiers += o.amount;
-                if (o.type === "moveCivilians") committedCivilians += o.amount;
-            }
+        for (const order of this.pendingOrders) {
+            if (order.from !== tileKey) continue;
+            if (order.type === "moveSoldiers") committedSoldiers += order.amount;
+            if (order.type === "moveCivilians") committedCivilians += order.amount;
         }
 
         return {
@@ -133,10 +147,7 @@ export class GameUI {
         };
     }
 
-    // ui.js
-
     submitCurrentPlayerOrders() {
-        console.log("hit");
         this.ordersByPlayer[this.currentPlayer.id] = this.pendingOrders;
         this.pendingOrders = [];
         this.selectedKey = null;
@@ -144,44 +155,55 @@ export class GameUI {
         this.hideOrderPanel();
 
         let nextIndex = this.currentPlayerIndex + 1;
-        while (nextIndex < this.engine.players.length && this.engine.players[nextIndex].isEliminated) {
+        while (
+            nextIndex < this.engine.players.length &&
+            this.engine.players[nextIndex].isEliminated
+        ) {
             nextIndex++;
         }
 
         const isLastPlayer = nextIndex >= this.engine.players.length;
 
-        // Pass to next player if round isn't finished
         if (!isLastPlayer) {
             this.currentPlayerIndex = nextIndex;
             this.currentPlayer = this.engine.players[this.currentPlayerIndex];
-            document.getElementById('ratioSlider').value = this.currentPlayer.civilianRatio * 100;
-            document.getElementById('ratioValue').textContent = `${this.currentPlayer.civilianRatio * 100}%`;
+            document.getElementById('ratioSlider').value =
+                this.currentPlayer.civilianRatio * 100;
+            document.getElementById('ratioValue').textContent =
+                `${this.currentPlayer.civilianRatio * 100}%`;
             this.render();
             return;
         }
 
-        // All players have submitted orders — execute turn resolution
-        // ui.js (inside submitCurrentPlayerOrders)
         try {
             const sanitizedOrders = this.engine.sanitizeOrders(this.ordersByPlayer);
             this.engine.simulateTurn(sanitizedOrders);
         } catch (err) {
-            this.engine.log.add(`❌ Turn resolution failed: ${err.message}`, [this.currentPlayer.id], "error");
+            this.engine.log.add(
+                `❌ Turn resolution failed: ${err.message}`,
+                [this.currentPlayer.id],
+                "error"
+            );
         }
 
-        // Reset turn cycle back to active Player 1
         this.ordersByPlayer = {};
         this.currentPlayerIndex = 0;
         this.currentPlayer = this.engine.players[0];
         this.advanceToActivePlayer();
 
         if (this.currentPlayer) {
-            document.getElementById('ratioSlider').value = this.currentPlayer.civilianRatio * 100;
-            document.getElementById('ratioValue').textContent = `${this.currentPlayer.civilianRatio * 100}%`;
+            document.getElementById('ratioSlider').value =
+                this.currentPlayer.civilianRatio * 100;
+            document.getElementById('ratioValue').textContent =
+                `${this.currentPlayer.civilianRatio * 100}%`;
         }
 
         if (!this.engine.state.isGameOver) {
-            this.engine.log.add("--- Round Complete ---", this.engine.players.map(p => p.id), "default");
+            this.engine.log.add(
+                "--- Round Complete ---",
+                this.engine.players.map(p => p.id),
+                "default"
+            );
         }
 
         this.updateLogDisplay();
@@ -190,8 +212,10 @@ export class GameUI {
 
     handleTileClick(q, r) {
         const clickedKey = `${q},${r}`;
-        const visible = this.engine.getVisibleTileKeys(this.currentPlayer);
 
+        // Visibility is a game-engine concern. The UI asks the engine for it;
+        // it does not calculate visibility itself.
+        const visible = this.engine.getVisibleTileKeys(this.currentPlayer);
         if (!visible.has(clickedKey)) return;
 
         const pop = this.engine.population.get(clickedKey);
@@ -211,35 +235,35 @@ export class GameUI {
             if (isNeighbor) {
                 this.targetKey = clickedKey;
                 this.showOrderPanel();
-            } else {
-                if (pop && pop.ownerId === this.currentPlayer.id) {
-                    const avail = this.getAvailableUnits(clickedKey);
-                    if (avail.soldiers > 0 || avail.civilians > 0) {
-                        this.selectedKey = clickedKey;
-                        this.hideOrderPanel();
-                    }
-                } else {
-                    this.selectedKey = null;
+            } else if (pop && pop.ownerId === this.currentPlayer.id) {
+                const avail = this.getAvailableUnits(clickedKey);
+                if (avail.soldiers > 0 || avail.civilians > 0) {
+                    this.selectedKey = clickedKey;
                     this.hideOrderPanel();
                 }
+            } else {
+                this.selectedKey = null;
+                this.hideOrderPanel();
             }
         }
+
         this.render();
     }
 
-    // ui.js
     updateOrderInputLimits() {
         if (!this.selectedKey || !this.targetKey) return;
 
         const avail = this.getAvailableUnits(this.selectedKey);
         const targetPop = this.engine.population.get(this.targetKey);
-        const isTargetOwnedByMe = targetPop && targetPop.ownerId === this.currentPlayer.id;
+        const isTargetOwnedByMe =
+            targetPop && targetPop.ownerId === this.currentPlayer.id;
 
         const btnCivilian = document.getElementById('toggleCivilianBtn');
         const btnSoldier = document.getElementById('toggleSoldierBtn');
 
         if (!isTargetOwnedByMe) {
             btnCivilian.disabled = true;
+
             if (this.selectedUnitType === "moveCivilians") {
                 this.selectedUnitType = "moveSoldiers";
                 btnSoldier.classList.add('active');
@@ -249,20 +273,22 @@ export class GameUI {
             btnCivilian.disabled = false;
         }
 
-        const maxCount = this.selectedUnitType === "moveSoldiers" ? avail.soldiers : avail.civilians;
+        const maxCount =
+            this.selectedUnitType === "moveSoldiers"
+                ? avail.soldiers
+                : avail.civilians;
+
         const input = document.getElementById('unitCountInput');
-        
-        // Clamp max attribute and value to remaining uncommitted balance
         input.max = maxCount;
         input.value = Math.min(input.value || 1, maxCount);
-        
-        // Disable confirm button if zero units remain
-        document.getElementById('confirmOrderBtn').disabled = (maxCount <= 0);
+
+        document.getElementById('confirmOrderBtn').disabled = maxCount <= 0;
     }
 
     showOrderPanel() {
         const panel = document.getElementById('orderPanel');
         const info = document.getElementById('orderInfo');
+
         info.textContent = `Move (${this.selectedKey}) ➔ (${this.targetKey})`;
         this.updateOrderInputLimits();
         panel.style.display = 'flex';
@@ -278,22 +304,31 @@ export class GameUI {
 
         if (this.engine.state.isGameOver) {
             const winner = this.engine.getPlayerById(this.engine.state.winnerId);
-            indicator.textContent = winner ? `🏆 ${winner.name} Wins the Game!` : "🏁 Game Over - Draw!";
+            indicator.textContent = winner
+                ? `🏆 ${winner.name} Wins the Game!`
+                : "🏁 Game Over - Draw!";
             indicator.style.borderColor = winner ? winner.color : "#ffffff";
             endBtn.disabled = true;
             endBtn.textContent = "Game Over";
             return;
         }
 
-        indicator.textContent = `${this.currentPlayer.name}'s turn to give orders`;
+        if (!this.currentPlayer) return;
+
+        indicator.textContent =
+            `${this.currentPlayer.name}'s turn to give orders`;
         indicator.style.borderColor = this.currentPlayer.color;
 
         let nextIndex = this.currentPlayerIndex + 1;
-        while (nextIndex < this.engine.players.length && this.engine.players[nextIndex].isEliminated) {
+        while (
+            nextIndex < this.engine.players.length &&
+            this.engine.players[nextIndex].isEliminated
+        ) {
             nextIndex++;
         }
 
         const isLastPlayer = nextIndex >= this.engine.players.length;
+
         endBtn.disabled = false;
         endBtn.textContent = isLastPlayer
             ? 'Submit Orders & Resolve Round'
@@ -303,10 +338,14 @@ export class GameUI {
     updateLogDisplay() {
         const logContainer = document.getElementById('gameLog');
         const activeId = this.currentPlayer ? this.currentPlayer.id : null;
-        const playerLog = activeId ? this.engine.log.getPlayerLog(activeId) : this.engine.log.entries;
+
+        const playerLog = activeId
+            ? this.engine.log.getPlayerLog(activeId)
+            : this.engine.log.entries;
 
         logContainer.innerHTML = playerLog.map(entry => {
             let className = '';
+
             switch (entry.type) {
                 case 'attack': className = 'log-attack'; break;
                 case 'defend': className = 'log-defend'; break;
@@ -315,8 +354,10 @@ export class GameUI {
                 case 'growth': className = 'log-growth'; break;
                 case 'error': className = 'log-error'; break;
             }
+
             return `<div class="gameLogEntry visible ${className}">${entry.message}</div>`;
         }).join('');
+
         logContainer.scrollTop = logContainer.scrollHeight;
     }
 
@@ -324,14 +365,23 @@ export class GameUI {
         this.updateTurnIndicator();
         this.updateLogDisplay();
 
+        // This is the critical visibility path:
+        // GameUI -> GameEngine.getVisibleTileKeys() -> BoardRenderer.
         const visible = this.currentPlayer
             ? this.engine.getVisibleTileKeys(this.currentPlayer)
             : new Set(this.engine.population.keys());
 
-        this.boardRenderer.render(this.engine.hexBoard, this.engine, visible, this.selectedKey, this.pendingOrders);
+        this.boardRenderer.render(
+            this.engine.hexBoard,
+            this.engine,
+            visible,
+            this.selectedKey,
+            this.pendingOrders
+        );
 
         if (this.currentPlayer) {
             const total = { civilians: 0, soldiers: 0, babies: 0 };
+
             for (const pop of this.engine.population.values()) {
                 if (pop.ownerId !== this.currentPlayer.id) continue;
                 total.civilians += pop.civilians;
@@ -341,10 +391,11 @@ export class GameUI {
 
             document.getElementById('populationStatus').textContent =
                 `Population — 🧑‍🌾 Civilians: ${total.civilians} | ` +
-                ` 💂 Soldiers: ${total.soldiers} | ` +
-                ` 👶 Babies: ${total.babies}`;
+                `💂 Soldiers: ${total.soldiers} | ` +
+                `👶 Babies: ${total.babies}`;
         } else {
-            document.getElementById('populationStatus').textContent = "Game Complete";
+            document.getElementById('populationStatus').textContent =
+                "Game Complete";
         }
     }
 }

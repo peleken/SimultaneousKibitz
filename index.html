@@ -1,131 +1,75 @@
-<!DOCTYPE html>
-<!--
-https://sm-dev-tool-kit.localhost/php/test/kibitz/
-
-## Game Rules
-### Each player submits their turn simultaneously, then the game engine processes all turns and updates the board state.
-
-### Starting Setup:
-    - Each player starts with 1 tile
-    - The player can see the tile they own and all adjacent tiles
-    - On the starting tile, each player has 2 civilians and 1 baby
-    - The player can choose (via slider) what percentage of babies become civilians or soldiers
-
-### Player Turn:
-    - Players can adjust their civilian/soldier ratio
-    - Players can attempt to claim an unowned adjacent tile by moving one or more soldiers to it.
-    - Players can move civilians to owned tiles to increase their population.
-
-### Game Engine:
-    - Once all players have submitted their turns, the game engine processes the moves and updates the board state
-    - Any tiles with multiple players attempting to claim them will be resolved via a conflict resolution mechanic (currently dice rolls)
-    - Conflicts are resolved similar to Risk (for now, 6 sided die rolls)
-        - If a player owns the tile, they have defender advantage
-        - If the tile is unowned, the larger army has advantage
-        - Ties are re-rolled until a winner is determined
-    - There can only be one owner per tile, and the winner of the conflict takes ownership of the tile
-    - Any existing babies on a tile will grow into civilians or soldiers based on the player's chosen ratio
-    - New babies are generated on each tile based on the number of civilians present (1 baby per 2 civilians)
-
-### Execution Flow:
-    - Validate & Reserve
-        - Validate all orders submitted and pull moving units into an in-transit pool
-    - Movement & Relocation
-        - Relocate civilians to friendly target tiles
-    - Conflict Resolution
-        - Resolve conflicts and tile ownership from attacking/reinforcing soldier pools
-    - Population Management
-        - Kill civilians on lost tiles
-        - Mature babies
-        - Generate new babies
-    - Win Condition Check
-        - Evaluate active players and declare winner if only one survives
-
-### Known Bugs:
-    - Was able to send non-existent "ghost soldiers" to tile through UI (game engine caught it)
-        - Once the Game engine encounters illegal move, "❌ Player 1: submitted 4 units from -2,0, but only 3 are available." there is no way to resolve.
-        - Preserved as-is through the file split below; not something this refactor touches.
-
-## CODING NOTES
-### Design Pattern (this pass: split into html/css/js, and state vs. rules):
-    - index.html    -- DOM skeleton only
-    - style.css      -- all styling
-    - js/geometry.js -- Tile, HexBoard: pure hex-grid math, no rules or ownership
-    - js/state.js    -- Player, TilePopulation, GameLog, GameState: pure data, no rules
-    - js/rules.js    -- Order, ConflictResolver, GameRules: all turn-resolution logic,
-                        takes a GameState as an explicit argument rather than owning one
-    - js/engine.js   -- GameEngine: owns the one authoritative GameState + GameRules pair,
-                        the only surface UI (or a future AI harness / server) talks to
-    - js/render.js   -- BoardRenderer: canvas drawing only, no rules knowledge
-    - js/ui.js       -- GameUI: DOM/canvas interaction only, talks to GameEngine
-    - js/main.js     -- bootstrap
-
-    Loaded as ES modules (type="module"), so this needs to be served over
-    http(s) -- opening index.html directly as a file:// URL will fail due
-    to CORS restrictions on module imports.
-
-### TO DO:
-    - Replace Math.random with deterministic random seed
-    - Make the game engine headless
-    - Possibility to simulate multiple headless games
-    - Add AI LLM testing ability (copy/paste for now)
-        - Ability to paste in AI's turn request (via json)
-    - Initial game setup menu
-        - Options for # of players (names), map size, fog of war, win conditions, starting population..
-    - Player registration system
-         - Get player names, have them log in, maybe email them when their turn is up
--->
+<!doctype html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Hexagonal Game Board Setup</title>
-    <link rel="stylesheet" href="style.css">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Simultaneous Kibitz - Refactored</title>
+<style>
+body { margin:0; background:#1a1a1a; color:white; text-align:center; font-family:sans-serif; }
+#uiContainer { display:flex; flex-direction:column; align-items:center; gap:8px; margin:10px; }
+canvas { background:#0f172a; border-radius:8px; box-shadow:0 4px 12px rgba(0,0,0,.5); cursor:pointer; }
+.panel { background:#2a2a2a; padding:10px 20px; border-radius:6px; display:flex; gap:15px; align-items:center; flex-wrap:wrap; justify-content:center; }
+button { background:#4f46e5; color:white; border:0; padding:8px 16px; border-radius:4px; cursor:pointer; font-weight:bold; }
+button:disabled { background:#555; cursor:not-allowed; }
+#turnIndicator { font-weight:bold; font-size:1.1em; border:2px solid; }
+.unit-toggle { background:#374151; border:1px solid #4b5563; padding:6px 12px; }
+.unit-toggle.active { background:#059669; border-color:#10b981; }
+#gameLog { background:#1f2937; padding:10px; border-radius:6px; max-height:150px; overflow-y:auto; text-align:left; width:80%; font-family:monospace; font-size:12px; }
+.gameLogEntry { color:#fff; margin:2px 0; padding:2px 4px; border-radius:2px; }
+.log-attack { color:#f59e0b; }
+.log-defend { color:#3b82f6; }
+.log-victory { color:#10b981; font-weight:bold; }
+.log-defeat { color:#ef4444; font-weight:bold; }
+.log-growth { color:#8b5cf6; }
+.log-error { color:#ef4444; }
+#stateOutput { width:80%; max-height:250px; overflow:auto; box-sizing:border-box; background:#111827; color:#d1d5db; padding:10px; border-radius:6px; text-align:left; font-size:11px; white-space:pre-wrap; }
+</style>
 </head>
 <body>
-    <h1>Simultaneous Kibitz - v 0.6 (split into html/css/js, state/rules decoupled)</h1>
-    <div id="uiContainer">
-        <div id="turnIndicator" class="panel"></div>
+<h1>Simultaneous Kibitz - Refactored</h1>
 
-        <div class="panel">
-            <label for="ratioSlider">Civilian Ratio (%): </label>
-            💂 Soldier
-            <input type="range" id="ratioSlider" min="0" max="100" step="25" value="50">
-            🧑‍🌾 Civilian
-            <span id="ratioValue">50%</span>
-        </div>
+<div id="uiContainer">
+    <div id="turnIndicator" class="panel"></div>
 
-        <div id="populationStatus" class="panel"></div>
-
-        <div id="orderPanel" class="panel" style="display:none;">
-            <span id="orderInfo">Select Target Tile</span>
-            <div>
-                <button type="button" id="toggleSoldierBtn" class="unit-toggle active">💂 Soldier</button>
-                <button type="button" id="toggleCivilianBtn" class="unit-toggle">🧑‍🌾 Civilian</button>
-            </div>
-            <input type="number" id="unitCountInput" min="1" value="1" style="width: 50px;">
-            <button id="confirmOrderBtn">Send Units</button>
-            <button id="cancelOrderBtn" style="background:#dc2626;">Cancel</button>
-        </div>
-
-        <canvas id="gameCanvas" width="800" height="600"></canvas>
-
-        <div class="panel">
-            <button id="endTurnBtn">Submit Orders</button>
-        </div>
-
-        <h3>Game Log</h3>
-        <div id="gameLog"></div>
-
-        <div class="panel" style="width:80%; box-sizing:border-box;">
-            <button id="showStateBtn" type="button">Show Game State JSON</button>
-            <button id="simulateEmptyBtn" type="button">Simulate Empty Turn</button>
-        </div>
-        <pre id="stateOutput" style="width:80%; max-height:250px; overflow:auto; box-sizing:border-box;
-            background:#111827; color:#d1d5db; padding:10px; border-radius:6px; text-align:left;
-            font-size:11px; white-space:pre-wrap;"></pre>
+    <div class="panel">
+        <label for="ratioSlider">Civilian Ratio (%): </label>
+        💂 Soldier
+        <input type="range" id="ratioSlider" min="0" max="100" step="25" value="50">
+        🧑‍🌾 Civilian
+        <span id="ratioValue">50%</span>
     </div>
 
-    <script type="module" src="main.js"></script>
+    <div id="populationStatus" class="panel"></div>
+
+    <div id="orderPanel" class="panel" style="display:none;">
+        <span id="orderInfo">Select Target Tile</span>
+        <div>
+            <button id="toggleSoldierBtn" class="unit-toggle active">💂 Soldier</button>
+            <button id="toggleCivilianBtn" class="unit-toggle">🧑‍🌾 Civilian</button>
+        </div>
+        <input type="number" id="unitCountInput" min="1" value="1" style="width:50px;">
+        <button id="confirmOrderBtn">Send Units</button>
+        <button id="cancelOrderBtn">Cancel</button>
+    </div>
+
+    <canvas id="gameCanvas" width="800" height="600"></canvas>
+
+    <div class="panel">
+        <button id="endTurnBtn">Submit Orders</button>
+    </div>
+
+    <h3>Game Log</h3>
+    <div id="gameLog"></div>
+
+    <div class="panel" style="width:80%;box-sizing:border-box;">
+        <button id="showStateBtn">Show Game State JSON</button>
+        <button id="simulateEmptyBtn">Simulate Empty Turn</button>
+    </div>
+
+    <pre id="stateOutput"></pre>
+</div>
+
+<!-- Application bootstrap. All game/UI behavior lives in the JS modules. -->
+<script type="module" src="./main.js"></script>
 </body>
 </html>

@@ -1,0 +1,1935 @@
+diff --git a/README.md b/README.md
+index 638f7cb..3af81cf 100644
+--- a/README.md
++++ b/README.md
+@@ -1,202 +1,63 @@
+-# Simultaneous Kibitz
+-
+-A prototype hex-grid strategy game: players grow population on hex tiles,
+-split growth between civilians and soldiers, and fight over territory
+-using simultaneous, blind turn submission (all players submit orders,
+-then the engine resolves everything at once).
+-
+-## Running it
+-
+-This project uses ES modules (`import`/`export`), so it must be served
+-over HTTP — opening `index.html` directly as a `file://` URL will fail
+-due to browser CORS restrictions on module imports.
+-
+-From this directory, any static file server works, for example:
+-
+-```bash
+-python3 -m http.server 8000
+-# or
+-npx serve .
++# Simultaneous Kibitz — Refactored Prototype
++
++## Architecture
++
++```text
++geometry.js
++    ↓
++state.js
++    ↓
++orders.js
++    ↓
++validation.js
++    ↓
++resolution.js
++    ├── movement.js
++    ├── combat.js
++    ├── growth.js
++    └── victory.js
++    ↓
++engine.js
+ ```
+ 
+-Then open `http://localhost:8000` (or whatever port/URL your server
+-gives you) in a browser.
+-
+-## Project structure
+-
+-```
+-index.html      DOM skeleton only — no styles or logic
+-style.css       All styling
+-js/
+-  geometry.js   Tile, HexBoard — pure hex-grid math, no rules or ownership
+-  state.js      Player, TilePopulation, GameLog, GameState — pure data, no rules
+-  rules.js      Order, ConflictResolver, GameRules — all turn-resolution logic
+-  engine.js     GameEngine — owns the one authoritative GameState + GameRules pair
+-  render.js     BoardRenderer — canvas drawing only, no rules knowledge
+-  ui.js         GameUI — DOM/canvas interaction only, talks to GameEngine
+-  main.js       Bootstrap: constructs GameEngine + GameUI, wires debug buttons
+-```
++`index.html` contains only the prototype UI/renderer and calls the engine.
+ 
+-## 🏗️ Architecture & Core Modules
++## Important movement rule
+ 
+-The engine is built around a strict separation of concerns, ensuring that data, rules, geometry, and presentation remain completely decoupled.
+-┌─────────────────┐       ┌─────────────────┐
+-│   geometry.js   │       │    state.js     │
+-│  (Grid & Math)  │       │  (Data & Log)   │
+-└────────┬────────┘       └────────┬────────┘
+-         │                         │
+-         └──────────┬──────────────┘
+-                    │
+-           ┌────────▼────────┐
+-           │    rules.js     │
+-           │(Game Logic Engine)
+-           └────────┬────────┘
+-                    │
+-           ┌────────▼────────┐
+-           │     ui.js       │
+-           │ (DOM & Canvas)  │
+-           └─────────────────┘
+-### Why it's split this way
++Soldier movement is treated as simultaneous.
+ 
+-The guiding principle is that each layer should be usable, and testable,
+-without the layers above it:
++Every soldier order is first removed from its source tile. Arrivals are then resolved together.
+ 
+-State = what is
+-Rules = what can happen
+-Resolution = what happened
++A reciprocal pair such as:
+ 
+-### Module Breakdown
+-
+-#### `geometry.js`
+-Contains purely mathematical representations of the hexagonal grid (`Tile`, `HexBoard`, `tileKey`). It manages spatial queries (such as neighbor lookups and bounds checking) while remaining entirely unaware of game state, tile ownership, or units. Geometry would be identical for a completely different game played on the same hex grid. It has no idea a "game" exists.
+-
+-#### `state.js`
+-Defines data-only containers (`GameState`, `Player`, `TilePopulation`) and serialization utilities (`clone()`, `serialize()`). Nothing here decides whether a move is legal or what happens when armies collide — it just describes what the current situation *is*.
+-
+-* **Logging Architecture**: The game logging system (`GameLog` and `NullGameLog`) lives directly within `state.js`.
+-  * **`GameLog`**: Stores turn narrative entries alongside visibility arrays (`visibleTo`) to dynamically handle Fog of War visibility per player.
+-  * **`NullGameLog`**: A drop-in replacement that discards all log events. This allows AI bots, move validators, or hypothetical simulation runs to execute `resolveTurn()` on cloned states without mutating or cluttering the primary UI event log.
++```text
++A → B
++B → A
++```
+ 
+-#### `rules.js`
+-Holds the core game engine logic (`GameRules`, `ConflictResolver`, `Order`). `GameRules` is stateless; it operates on any given `GameState` instance. It handles:
+-* Move validation, order clamping, and order pruning.
+-* Step-by-step resolution (civilian relocation, multi-attacker soldier combat, and population growth).
+-* Win/loss evaluation.
++is detected as an **edge battle**. The armies engage instead of passing through one another. The winner proceeds into the destination it originally intended to enter.
+ 
+-#### `ui.js`
+-Manages canvas rendering, turn flow UI, order panel controls, and DOM events. `GameUI` reads state and triggers engine simulation turns, but never modifies `GameState` properties directly.lop
++This is deliberately explicit rather than relying on the order in which JavaScript happens to process the orders.
+ 
+-#### **`render.js`** and **`ui.js`** 
+-have zero rules knowledge. They read game data through the `GameEngine` facade and translate clicks into `Order`s, but never resolve a battle or grow a population themselves.
++## Determinism
+ 
+-### GameEngine can already run headless
++`ConflictResolver` accepts an injected random function:
+ 
+-`GameEngine` has no DOM/canvas dependency at all. It's the only place that knows a `GameState` and a `GameRules` belong together for a given game session. `GameEngine` is the single surface everything else talks to — currently `GameUI`, but it works identically with no DOM present at all (see the "headless" note below).
++```js
++new ConflictResolver(() => seededRandom());
++```
+ 
+-This split is what makes the state/rules boundary in the TO DO list below (headless engine, deterministic simulation, AI testing) tractable without rewriting the rules or the UI.
++The current UI uses `Math.random`, but the simulation layer no longer requires it. A seeded RNG can therefore be added without changing game rules.
+ 
+-From a plain Node script (no browser)
++## Suggested next step
+ 
+-```js
+-import { GameEngine } from './js/engine.js';
+-
+-const engine = new GameEngine();
+-const snapshot = engine.simulateTurn({
+-    1: [/* Order objects for player 1 */],
+-    2: [/* Order objects for player 2 */]
+-});
+-console.log(snapshot); // JSON-serializable game state
+-```
++Add automated tests around `TurnResolver`, especially:
+ 
+-`simulateTurn()` validates orders internally and throws on anything
+-illegal, so it's safe to call from code that hasn't validated up front
+-(an AI harness, a script, a server endpoint) — `GameUI` also validates
+-before calling it, purely so players get a friendly log message instead
+-of a thrown error.
+-
+-## Game rules (current)
+-
+-**Starting setup**
+-- Each player starts with 1 tile, 2 civilians, and 1 baby.
+-- Players can see the tile they own and all adjacent tiles (fog of war
+-  elsewhere).
+-
+-**Each turn**
+-- Players adjust their civilian/soldier growth ratio via slider.
+-- Players can move soldiers onto an adjacent tile to attack or
+-  reinforce it.
+-- Players can move civilians onto an adjacent *friendly* tile to
+-  relocate population.
+-- All players submit simultaneously; nothing resolves until everyone
+-  has submitted.
+-
+-**Turn resolution order**
+-1. **Validate & reserve** — every order is checked against current
+-   state, and units are pulled into an in-transit pool up front so they
+-   can't be double-spent or reused within the same turn.
+-2. **Movement & relocation** — civilian relocations are applied to
+-   friendly destination tiles.
+-3. **Conflict resolution** — soldiers arriving on a tile either
+-   reinforce (same owner) or fight (different owner), via dice rolls:
+-   - Owned tiles: the defender gets an advantage.
+-   - Unowned tiles: the larger army gets an advantage.
+-   - Ties are re-rolled.
+-   - Losing a tile kills any civilians/babies present on it.
+-4. **Population growth** — babies mature into civilians/soldiers per
+-   the owning player's ratio; new babies are generated (1 per 2
+-   civilians).
+-5. **Win condition check** — a player with no tiles or no units left is
+-   eliminated; the last player standing wins (or it's a draw if
+-   everyone is wiped out simultaneously).
+-
+-## Known bugs
+-
+-- When two armies cross, they do not fight. 
+-   Currently, if Player 1's army is going North West and Player 2's army in the adjacent North West tile is going South East, the armies cross each other. This is a bug. Both armies should be treated as attacking armies and the surviving army ought to proceed and occupy the destination tile, if the destination contains remaining soldiers, that ought to be treated as a second battle (with an attacker and defender).
+-
+-## TO DO
+-
+-- Replace `Math.random` with a deterministic random seed (needed for
+-  reproducible simulations/replays).
+-- Make the game engine headless — mostly already true; see above.
+-- Support simulating multiple headless games in a batch.
+-- AI/LLM testing harness (paste a turn request as JSON, paste back an
+-  AI's response).
+-- Initial game setup menu — player count/names, map size, fog of war
+-  toggle, win conditions, starting population.
+-- Player registration/login, turn notifications.
+-
+-- Work towards 
+-                    ┌───────────────┐
+-                    │   Game State  │
+-                    └───────┬───────┘
+-                            │
+-                     ┌──────▼──────┐
+-                     │  Game Rules │
+-                     └──────┬──────┘
+-                            │
+-                     ┌──────▼──────┐
+-                     │   Orders    │
+-                     └──────┬──────┘
+-                            │
+-                ┌───────────▼───────────┐
+-                │    Turn Resolver      │
+-                └───────────┬───────────┘
+-                            │
+-                   ┌────────▼────────┐
+-                   │   Turn Result   │
+-                   └────┬─────┬──────┘
+-                        │     │
+-              ┌─────────┘     └──────────┐
+-              ▼                          ▼
+-          UI / Replay                  AI
+-- Then
+-                 Game Simulator
+-                       │
+-          ┌────────────┼────────────┐
+-          ▼            ▼            ▼
+-       Player A     Player B     Player C
+-          │            │            │
+-          └────────────┼────────────┘
+-                       ▼
+-                  Turn Resolver
+\ No newline at end of file
++- reciprocal movement
++- two attackers entering one tile
++- three attackers entering one tile
++- attack against a tile whose defender is simultaneously leaving
++- reinforcement plus attack
++- civilian movement during combat
++- capture and civilian/baby loss
++- deterministic seeded combat
+diff --git a/combat.js b/combat.js
+new file mode 100644
+index 0000000..aacfce1
+--- /dev/null
++++ b/combat.js
+@@ -0,0 +1,87 @@
++export class ConflictResolver {
++    constructor(random = Math.random, sides = 6) {
++        this.random = random;
++        this.sides = sides;
++    }
++
++    rollDie() {
++        return Math.floor(this.random() * this.sides) + 1;
++    }
++
++    randomChoice(items) {
++        if (!items.length) return null;
++        return items[Math.floor(this.random() * items.length)];
++    }
++
++    /**
++     * Resolve combat between any number of armies.
++     *
++     * Each round:
++     *  1. Every surviving army rolls.
++     *  2. Highest roll wins the round. High ties are broken by defender,
++     *     then larger army, then randomly among the remaining tied armies.
++     *  3. Lowest roll takes one casualty. Low ties are resolved randomly.
++     *  4. Repeat until one army remains.
++     *
++     * Exactly one soldier is lost per round.
++     */
++    resolve(armies) {
++        let contenders = armies
++            .filter(army => army.amount > 0)
++            .map(army => ({ ...army }));
++
++        const rounds = [];
++
++        while (contenders.length > 1) {
++            for (const army of contenders) {
++                army.roll = this.rollDie();
++            }
++
++            const highestRoll = Math.max(...contenders.map(a => a.roll));
++            const highest = contenders.filter(a => a.roll === highestRoll);
++            const roundWinner = this.breakHighTie(highest);
++
++            const lowestRoll = Math.min(...contenders.map(a => a.roll));
++            const lowest = contenders.filter(a => a.roll === lowestRoll);
++            const casualty = this.randomChoice(lowest);
++            casualty.amount--;
++
++            rounds.push({
++                rolls: contenders.map(a => ({
++                    playerId: a.playerId,
++                    amountBefore: a.amount + (a === casualty ? 1 : 0),
++                    roll: a.roll,
++                    isDefender: Boolean(a.isDefender)
++                })),
++                highRoll: highestRoll,
++                roundWinnerId: roundWinner.playerId,
++                casualtyPlayerId: casualty.playerId
++            });
++
++            contenders = contenders.filter(a => a.amount > 0);
++        }
++
++        const winner = contenders[0] ?? null;
++
++        return {
++            winnerId: winner?.playerId ?? null,
++            survivingSoldiers: winner?.amount ?? 0,
++            rounds
++        };
++    }
++
++    breakHighTie(tied) {
++        // A defending army gets tie advantage, provided exactly one defender
++        // is among the highest rollers.
++        const defenders = tied.filter(army => army.isDefender);
++        if (defenders.length === 1) return defenders[0];
++
++        // Otherwise the larger army gets tie advantage.
++        const largest = Math.max(...tied.map(army => army.amount));
++        const largestArmies = tied.filter(army => army.amount === largest);
++        if (largestArmies.length === 1) return largestArmies[0];
++
++        // Finally, choose randomly among the remaining tied highest rollers.
++        return this.randomChoice(largestArmies);
++    }
++}
+diff --git a/engine.js b/engine.js
+index f06bbbf..4314476 100644
+--- a/engine.js
++++ b/engine.js
+@@ -1,138 +1,68 @@
+-/*
+- * engine.js
+- *
+- * GameEngine is the ONLY thing that knows a GameState and a GameRules
+- * instance go together. It owns both, plus the log, and is the single
+- * surface everything else (GameUI today; an AI harness or server
+- * endpoint later) talks to.
++import { normalizeOrders } from "./orders.js";
++import { OrderValidator } from "./validation.js";
++import { TurnResolver } from "./resolution.js";
++
++/**
++ * Public boundary for simulation.
+  *
+- * simulateTurn() ALWAYS validates internally before resolving, even
+- * though GameUI also validates up front (so it can show a friendly
+- * in-log error instead of catching an exception). This means any other
+- * future caller can't accidentally corrupt game state by skipping
+- * validation.
++ * The engine is intentionally unaware of the DOM/canvas. A server, UI,
++ * replay system, or AI can all call the same methods.
+  */
+ 
+-import { HexBoard } from './geometry.js';
+-import { GameState, GameLog, Player } from './state.js';
+-import { GameRules, ConflictResolver } from './rules.js';
+-
+ export class GameEngine {
+-    constructor() {
+-        this.hexBoard = new HexBoard(2);
+-        this.conflictResolver = new ConflictResolver();
+-        this.rules = new GameRules(this.hexBoard, this.conflictResolver);
+-
+-        const players = [
+-            new Player(1, "Player 1", "#b91c1c", 0),  // Red
+-            new Player(2, "Player 2", "#1d4ed8", 0)   // Blue
+-        ];
+-        this.state = new GameState(players, new Map(), 0);
+-        this.log = new GameLog();
+-
+-        this.rules.setupStartingTiles(this.state, this.log);
++    constructor({
++        state,
++        board,
++        validator = new OrderValidator(board),
++        resolver = new TurnResolver()
++    }) {
++        this.state = state;
++        this.board = board;
++        this.validator = validator;
++        this.resolver = resolver;
+     }
+ 
+-    // Convenience accessors so callers (mainly GameUI) can read
+-    // this.engine.players / .population without reaching through
+-    // this.engine.state every time. These are read-only views onto
+-    // state -- the engine still owns the one authoritative GameState.
+-    get players() { return this.state.players; }
+-    get population() { return this.state.population; }
+-
+-    getPlayerById(id) {
+-        return this.state.getPlayerById(id);
+-    }
++    validateOrders(ordersByPlayerId) {
++        const normalized = normalizeOrders(
++            ordersByPlayerId,
++            this.state.players
++        );
+ 
+-    getVisibleTileKeys(player) {
+-        return this.rules.getVisibleTileKeys(this.state, player);
++        return this.validator.validate(this.state, normalized);
+     }
+ 
+     simulateTurn(ordersByPlayerId) {
+-        if (this.state.isGameOver) {
+-            throw new Error("Game is already over.");
+-        }
+-
+-        const normalizedOrders = {};
++        const normalized = normalizeOrders(
++            ordersByPlayerId,
++            this.state.players
++        );
+ 
+-        for (const player of this.state.players) {
+-            const orders = ordersByPlayerId[player.id] || [];
+-
+-            if (!Array.isArray(orders)) {
+-                throw new Error(`Orders for ${player.name} must be an array.`);
+-            }
+-
+-            normalizedOrders[player.id] = orders;
+-        }
++        const validation = this.validator.validate(
++            this.state,
++            normalized
++        );
+ 
+-        const validation = this.validateOrders(normalizedOrders);
+         if (!validation.valid) {
+             throw new Error(
+-                `simulateTurn() called with invalid orders:\n- ${validation.errors.join('\n- ')}`
++                `Cannot resolve invalid orders:\n${validation.errors.join("\n")}`
+             );
+         }
+ 
+-        this.rules.resolveTurn(this.state, normalizedOrders, this.log);
++        const result = this.resolver.resolve(
++            this.state,
++            normalized
++        );
+ 
+-        return this.getStateSnapshot();
++        this.state = result.state;
++
++        return result;
+     }
+ 
+     getStateSnapshot() {
+         return this.state.serialize();
+     }
+- 
+-    sanitizeOrders(ordersByPlayerId) {
+-       return this.rules.sanitizeOrders(this.state, ordersByPlayerId, this.log);
+-    }
+-
+-    validateOrders(ordersByPlayerId) {
+-        const errors = [];
+-
+-        for (const player of this.state.players) {
+-            if (player.isEliminated) continue;
+-
+-            const orders = ordersByPlayerId[player.id] || [];
+-            const committed = new Map();
+-
+-            for (const order of orders) {
+-                if (order.playerId !== player.id) {
+-                    errors.push(`${player.name}: order contains the wrong player ID.`);
+-                    continue;
+-                }
+-
+-                if (!this.rules.validateOrder(this.state, order, player.id)) {
+-                    errors.push(
+-                        `${player.name}: invalid ${order.type} from ${order.from} ` +
+-                        `to ${order.to} (${order.amount}).`
+-                    );
+-                    continue;
+-                }
+-
+-                const key = `${order.from}:${order.type}`;
+-                committed.set(key, (committed.get(key) || 0) + order.amount);
+-            }
+-
+-            for (const [commitKey, amount] of committed) {
+-                const [from, type] = commitKey.split(":");
+-                const pop = this.state.population.get(from);
+-                if (!pop) continue;
+-
+-                const available = type === "moveSoldiers"
+-                    ? pop.soldiers
+-                    : pop.civilians;
+-
+-                if (amount > available) {
+-                    errors.push(
+-                        `${player.name}: submitted ${amount} units from ${from}, ` +
+-                        `but only ${available} are available.`
+-                    );
+-                }
+-            }
+-        }
+ 
+-        return {
+-            valid: errors.length === 0,
+-            errors
+-        };
++    getState() {
++        return this.state;
+     }
+ }
+diff --git a/game.js b/game.js
+new file mode 100644
+index 0000000..0d19fd4
+--- /dev/null
++++ b/game.js
+@@ -0,0 +1,61 @@
++import { HexBoard, tileKey } from "./geometry.js";
++import { GameState, Player, TilePopulation } from "./state.js";
++import { ConflictResolver } from "./combat.js";
++import { GameEngine } from "./engine.js";
++
++export function createGame({
++    radius = 2,
++    players = [
++        new Player(1, "Player 1", "#b91c1c", 0),
++        new Player(2, "Player 2", "#1d4ed8", 0)
++    ],
++    random = Math.random
++} = {}) {
++    const board = new HexBoard(radius);
++    const population = new Map();
++
++    const startingPositions = [
++        { q: -2, r: 0 },
++        { q: 2, r: 0 }
++    ];
++
++    players.forEach((player, index) => {
++        const position = startingPositions[index];
++        if (!position) return;
++
++        population.set(
++            tileKey(position.q, position.r),
++            new TilePopulation(player.id, 2, 3, 1)
++        );
++    });
++
++    const state = new GameState(players, population, 0);
++
++    const engine = new GameEngine({
++        state,
++        board,
++        resolver: undefined
++    });
++
++    // Rebuild with an injected RNG without exposing resolver internals to UI.
++    engine.resolver.combat.random = random;
++
++    return { board, engine };
++}
++
++export function getVisibleTileKeys(game, playerId) {
++    const visible = new Set();
++
++    for (const [key, pop] of game.engine.state.population) {
++        if (pop.ownerId !== playerId) continue;
++
++        visible.add(key);
++
++        const { q, r } = key.split(",").map(Number);
++        for (const neighbor of game.board.getNeighbors(q, r)) {
++            visible.add(tileKey(neighbor.q, neighbor.r));
++        }
++    }
++
++    return visible;
++}
+diff --git a/geometry.js b/geometry.js
+index da3ea9c..d9f17a1 100644
+--- a/geometry.js
++++ b/geometry.js
+@@ -1,52 +1,62 @@
+-/*
+- * geometry.js
+- *
+- * Hex-grid geometry only: tile shape, board layout, adjacency.
+- * No game rules, no ownership, no population data. This module
+- * would be identical for a completely different game played on
+- * the same hex grid.
++/**
++ * Pure hex-grid geometry.
++ * No game state or game-rule knowledge belongs here.
+  */
+ 
++export const HEX_DIRECTIONS = [
++    [1, 0], [1, -1], [0, -1],
++    [-1, 0], [-1, 1], [0, 1]
++];
++
+ export function tileKey(q, r) {
+     return `${q},${r}`;
+ }
+ 
+-export class Tile {
+-    constructor(q, r, s) {
+-        this.q = q;
+-        this.r = r;
+-        this.s = s;
+-    }
++export function parseTileKey(key) {
++    const [q, r] = key.split(",").map(Number);
++    return { q, r };
++}
++
++export function cubeS(q, r) {
++    return -q - r;
++}
++
++export function isValidHex(q, r, radius) {
++    return Math.max(Math.abs(q), Math.abs(r), Math.abs(cubeS(q, r))) <= radius;
++}
++
++export function neighbors(q, r, radius = Infinity) {
++    return HEX_DIRECTIONS
++        .map(([dq, dr]) => ({ q: q + dq, r: r + dr }))
++        .filter(({ q: nq, r: nr }) => isValidHex(nq, nr, radius));
++}
++
++export function areNeighbors(a, b) {
++    const dq = a.q - b.q;
++    const dr = a.r - b.r;
++    return Math.max(Math.abs(dq), Math.abs(dr), Math.abs(dq + dr)) === 1;
+ }
+ 
+ export class HexBoard {
+-    constructor(radius) {
++    constructor(radius = 2) {
+         this.radius = radius;
+-        this.tiles = this.createHexBoard();
+-    }
+-
+-    createHexBoard() {
+-        const radius = this.radius;
+-        const tiles = [];
++        this.tiles = [];
+ 
+         for (let q = -radius; q <= radius; q++) {
+             const r1 = Math.max(-radius, -q - radius);
+             const r2 = Math.min(radius, -q + radius);
++
+             for (let r = r1; r <= r2; r++) {
+-                tiles.push(new Tile(q, r, -q - r));
++                this.tiles.push({ q, r, s: cubeS(q, r) });
+             }
+         }
+-        return tiles;
+     }
+ 
+-    getNeighbors(q, r) {
+-        const dirs = [[1, 0], [1, -1], [0, -1], [-1, 0], [-1, 1], [0, 1]];
+-        return dirs
+-            .map(([dq, dr]) => ({ q: q + dq, r: r + dr }))
+-            .filter(({ q, r }) => this.hasTile(q, r));
++    hasTile(q, r) {
++        return isValidHex(q, r, this.radius);
+     }
+ 
+-    hasTile(q, r) {
+-        return Math.max(Math.abs(q), Math.abs(r), Math.abs(-q - r)) <= this.radius;
++    getNeighbors(q, r) {
++        return neighbors(q, r, this.radius);
+     }
+ }
+diff --git a/growth.js b/growth.js
+new file mode 100644
+index 0000000..84f181b
+--- /dev/null
++++ b/growth.js
+@@ -0,0 +1,41 @@
++/**
++ * Population growth is its own phase so its timing is explicit.
++ */
++
++export class GrowthResolver {
++    resolve(state, events = []) {
++        const nextState = state.clone();
++
++        for (const player of nextState.players) {
++            let totalGrowth = 0;
++
++            for (const pop of nextState.population.values()) {
++                if (pop.ownerId !== player.id) continue;
++
++                const babiesToMature = pop.babies;
++                const newCivilians = Math.floor(
++                    babiesToMature * player.civilianRatio
++                );
++                const newSoldiers = babiesToMature - newCivilians;
++                const newBabies = Math.floor(pop.civilians / 2);
++
++                pop.civilians += newCivilians;
++                pop.soldiers += newSoldiers;
++                pop.babies = newBabies;
++
++                totalGrowth += newCivilians + newSoldiers + newBabies;
++            }
++
++            if (totalGrowth > 0) {
++                events.push({
++                    type: "growth",
++                    playerId: player.id,
++                    amount: totalGrowth,
++                    visibleTo: [player.id]
++                });
++            }
++        }
++
++        return { state: nextState, events };
++    }
++}
+diff --git a/index.html b/index.html
+index ae7b58a..49d6c47 100644
+--- a/index.html
++++ b/index.html
+@@ -1,131 +1,335 @@
+-<!DOCTYPE html>
+-<!--
+-https://sm-dev-tool-kit.localhost/php/test/kibitz/
+-
+-## Game Rules
+-### Each player submits their turn simultaneously, then the game engine processes all turns and updates the board state.
+-
+-### Starting Setup:
+-    - Each player starts with 1 tile
+-    - The player can see the tile they own and all adjacent tiles
+-    - On the starting tile, each player has 2 civilians and 1 baby
+-    - The player can choose (via slider) what percentage of babies become civilians or soldiers
+-
+-### Player Turn:
+-    - Players can adjust their civilian/soldier ratio
+-    - Players can attempt to claim an unowned adjacent tile by moving one or more soldiers to it.
+-    - Players can move civilians to owned tiles to increase their population.
+-
+-### Game Engine:
+-    - Once all players have submitted their turns, the game engine processes the moves and updates the board state
+-    - Any tiles with multiple players attempting to claim them will be resolved via a conflict resolution mechanic (currently dice rolls)
+-    - Conflicts are resolved similar to Risk (for now, 6 sided die rolls)
+-        - If a player owns the tile, they have defender advantage
+-        - If the tile is unowned, the larger army has advantage
+-        - Ties are re-rolled until a winner is determined
+-    - There can only be one owner per tile, and the winner of the conflict takes ownership of the tile
+-    - Any existing babies on a tile will grow into civilians or soldiers based on the player's chosen ratio
+-    - New babies are generated on each tile based on the number of civilians present (1 baby per 2 civilians)
+-
+-### Execution Flow:
+-    - Validate & Reserve
+-        - Validate all orders submitted and pull moving units into an in-transit pool
+-    - Movement & Relocation
+-        - Relocate civilians to friendly target tiles
+-    - Conflict Resolution
+-        - Resolve conflicts and tile ownership from attacking/reinforcing soldier pools
+-    - Population Management
+-        - Kill civilians on lost tiles
+-        - Mature babies
+-        - Generate new babies
+-    - Win Condition Check
+-        - Evaluate active players and declare winner if only one survives
+-
+-### Known Bugs:
+-    - Was able to send non-existent "ghost soldiers" to tile through UI (game engine caught it)
+-        - Once the Game engine encounters illegal move, "❌ Player 1: submitted 4 units from -2,0, but only 3 are available." there is no way to resolve.
+-        - Preserved as-is through the file split below; not something this refactor touches.
+-
+-## CODING NOTES
+-### Design Pattern (this pass: split into html/css/js, and state vs. rules):
+-    - index.html    -- DOM skeleton only
+-    - style.css      -- all styling
+-    - js/geometry.js -- Tile, HexBoard: pure hex-grid math, no rules or ownership
+-    - js/state.js    -- Player, TilePopulation, GameLog, GameState: pure data, no rules
+-    - js/rules.js    -- Order, ConflictResolver, GameRules: all turn-resolution logic,
+-                        takes a GameState as an explicit argument rather than owning one
+-    - js/engine.js   -- GameEngine: owns the one authoritative GameState + GameRules pair,
+-                        the only surface UI (or a future AI harness / server) talks to
+-    - js/render.js   -- BoardRenderer: canvas drawing only, no rules knowledge
+-    - js/ui.js       -- GameUI: DOM/canvas interaction only, talks to GameEngine
+-    - js/main.js     -- bootstrap
+-
+-    Loaded as ES modules (type="module"), so this needs to be served over
+-    http(s) -- opening index.html directly as a file:// URL will fail due
+-    to CORS restrictions on module imports.
+-
+-### TO DO:
+-    - Replace Math.random with deterministic random seed
+-    - Make the game engine headless
+-    - Possibility to simulate multiple headless games
+-    - Add AI LLM testing ability (copy/paste for now)
+-        - Ability to paste in AI's turn request (via json)
+-    - Initial game setup menu
+-        - Options for # of players (names), map size, fog of war, win conditions, starting population..
+-    - Player registration system
+-         - Get player names, have them log in, maybe email them when their turn is up
+--->
++<!doctype html>
+ <html lang="en">
+ <head>
+-    <meta charset="UTF-8">
+-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+-    <title>Hexagonal Game Board Setup</title>
+-    <link rel="stylesheet" href="style.css">
++<meta charset="UTF-8">
++<meta name="viewport" content="width=device-width, initial-scale=1.0">
++<title>Simultaneous Kibitz - Refactored</title>
++<style>
++body { margin:0; background:#1a1a1a; color:white; text-align:center; font-family:sans-serif; }
++#uiContainer { display:flex; flex-direction:column; align-items:center; gap:8px; margin:10px; }
++canvas { background:#0f172a; border-radius:8px; box-shadow:0 4px 12px rgba(0,0,0,.5); cursor:pointer; }
++.panel { background:#2a2a2a; padding:10px 20px; border-radius:6px; display:flex; gap:15px; align-items:center; flex-wrap:wrap; justify-content:center; }
++button { background:#4f46e5; color:white; border:0; padding:8px 16px; border-radius:4px; cursor:pointer; font-weight:bold; }
++button:disabled { background:#555; cursor:not-allowed; }
++#turnIndicator { font-weight:bold; font-size:1.1em; border:2px solid; }
++.unit-toggle { background:#374151; border:1px solid #4b5563; padding:6px 12px; }
++.unit-toggle.active { background:#059669; border-color:#10b981; }
++#gameLog { background:#1f2937; padding:10px; border-radius:6px; max-height:150px; overflow-y:auto; text-align:left; width:80%; font-family:monospace; font-size:12px; }
++.gameLogEntry { color:#fff; margin:2px 0; padding:2px 4px; border-radius:2px; }
++.log-attack { color:#f59e0b; }
++.log-defend { color:#3b82f6; }
++.log-victory { color:#10b981; font-weight:bold; }
++.log-defeat { color:#ef4444; font-weight:bold; }
++.log-growth { color:#8b5cf6; }
++.log-error { color:#ef4444; }
++#stateOutput { width:80%; max-height:250px; overflow:auto; box-sizing:border-box; background:#111827; color:#d1d5db; padding:10px; border-radius:6px; text-align:left; font-size:11px; white-space:pre-wrap; }
++</style>
+ </head>
+ <body>
+-    <h1>Simultaneous Kibitz - v 0.6 (split into html/css/js, state/rules decoupled)</h1>
+-    <div id="uiContainer">
+-        <div id="turnIndicator" class="panel"></div>
+-
+-        <div class="panel">
+-            <label for="ratioSlider">Civilian Ratio (%): </label>
+-            💂 Soldier
+-            <input type="range" id="ratioSlider" min="0" max="100" step="25" value="50">
+-            🧑‍🌾 Civilian
+-            <span id="ratioValue">50%</span>
++<h1>Simultaneous Kibitz - Refactored</h1>
++<div id="uiContainer">
++    <div id="turnIndicator" class="panel"></div>
++    <div class="panel">
++        <label for="ratioSlider">Civilian Ratio (%): </label>
++        💂 Soldier
++        <input type="range" id="ratioSlider" min="0" max="100" step="25" value="50">
++        🧑‍🌾 Civilian
++        <span id="ratioValue">50%</span>
++    </div>
++    <div id="populationStatus" class="panel"></div>
++    <div id="orderPanel" class="panel" style="display:none;">
++        <span id="orderInfo">Select Target Tile</span>
++        <div>
++            <button id="toggleSoldierBtn" class="unit-toggle active">💂 Soldier</button>
++            <button id="toggleCivilianBtn" class="unit-toggle">🧑‍🌾 Civilian</button>
+         </div>
++        <input type="number" id="unitCountInput" min="1" value="1" style="width:50px;">
++        <button id="confirmOrderBtn">Send Units</button>
++        <button id="cancelOrderBtn">Cancel</button>
++    </div>
++    <canvas id="gameCanvas" width="800" height="600"></canvas>
++    <div class="panel"><button id="endTurnBtn">Submit Orders</button></div>
++    <h3>Game Log</h3>
++    <div id="gameLog"></div>
++    <div class="panel" style="width:80%;box-sizing:border-box;">
++        <button id="showStateBtn">Show Game State JSON</button>
++        <button id="simulateEmptyBtn">Simulate Empty Turn</button>
++    </div>
++    <pre id="stateOutput"></pre>
++</div>
+ 
+-        <div id="populationStatus" class="panel"></div>
+-
+-        <div id="orderPanel" class="panel" style="display:none;">
+-            <span id="orderInfo">Select Target Tile</span>
+-            <div>
+-                <button type="button" id="toggleSoldierBtn" class="unit-toggle active">💂 Soldier</button>
+-                <button type="button" id="toggleCivilianBtn" class="unit-toggle">🧑‍🌾 Civilian</button>
+-            </div>
+-            <input type="number" id="unitCountInput" min="1" value="1" style="width: 50px;">
+-            <button id="confirmOrderBtn">Send Units</button>
+-            <button id="cancelOrderBtn" style="background:#dc2626;">Cancel</button>
+-        </div>
++<script type="module">
++import { createGame, getVisibleTileKeys } from "./game.js";
++import { tileKey, parseTileKey } from "./geometry.js";
++import { Order, ORDER_TYPES } from "./orders.js";
+ 
+-        <canvas id="gameCanvas" width="800" height="600"></canvas>
++class GameLog {
++    constructor() { this.entries = []; }
++    add(message, visibleTo = [], type = "default") {
++        this.entries.push({ message, visibleTo, type, turn: this.entries.length });
++    }
++    getPlayerLog(playerId) {
++        return this.entries.filter(e => !e.visibleTo.length || e.visibleTo.includes(playerId));
++    }
++}
+ 
+-        <div class="panel">
+-            <button id="endTurnBtn">Submit Orders</button>
+-        </div>
++class BoardRenderer {
++    constructor(canvas, tileSize = 65) {
++        this.canvas = canvas;
++        this.ctx = canvas.getContext("2d");
++        this.tileSize = tileSize;
++        this.originX = canvas.width / 2;
++        this.originY = canvas.height / 2;
++        this.terrainColor = "#2e7d32";
++    }
+ 
+-        <h3>Game Log</h3>
+-        <div id="gameLog"></div>
++    axialToPixel(q, r) {
++        return {
++            x: this.originX + this.tileSize * (Math.sqrt(3) * q + Math.sqrt(3) / 2 * r),
++            y: this.originY + this.tileSize * (3 / 2 * r)
++        };
++    }
+ 
+-        <div class="panel" style="width:80%; box-sizing:border-box;">
+-            <button id="showStateBtn" type="button">Show Game State JSON</button>
+-            <button id="simulateEmptyBtn" type="button">Simulate Empty Turn</button>
+-        </div>
+-        <pre id="stateOutput" style="width:80%; max-height:250px; overflow:auto; box-sizing:border-box;
+-            background:#111827; color:#d1d5db; padding:10px; border-radius:6px; text-align:left;
+-            font-size:11px; white-space:pre-wrap;"></pre>
+-    </div>
++    roundHex(q, r) {
++        const s = -q - r;
++        let rq = Math.round(q), rr = Math.round(r), rs = Math.round(s);
++        const qd = Math.abs(rq-q), rd = Math.abs(rr-r), sd = Math.abs(rs-s);
++        if (qd > rd && qd > sd) rq = -rr-rs;
++        else if (rd > sd) rr = -rq-rs;
++        return { q:rq, r:rr };
++    }
++
++    getTileAtPixel(px, py, board) {
++        const q = ((px-this.originX)*Math.sqrt(3)/3 - (py-this.originY)/3) / this.tileSize;
++        const r = (py-this.originY)*2/3 / this.tileSize;
++        const rounded = this.roundHex(q,r);
++        return board.hasTile(rounded.q, rounded.r) ? rounded : null;
++    }
++
++    render(board, state, visibleKeys, selectedKey, pendingOrders) {
++        this.ctx.clearRect(0,0,this.canvas.width,this.canvas.height);
++        for (const tile of board.tiles) {
++            const key = tileKey(tile.q,tile.r);
++            const {x,y} = this.axialToPixel(tile.q,tile.r);
++            if (!visibleKeys.has(key)) { this.drawFog(x,y); continue; }
++            const pop = state.population.get(key);
++            const player = pop?.ownerId ? state.getPlayerById(pop.ownerId) : null;
++            this.drawHex(x,y,player?.color || this.terrainColor,key===selectedKey);
++        }
++
++        for (const order of pendingOrders) {
++            const [fq,fr] = order.from.split(",").map(Number);
++            const [tq,tr] = order.to.split(",").map(Number);
++            const start=this.axialToPixel(fq,fr), end=this.axialToPixel(tq,tr);
++            const color=order.type===ORDER_TYPES.MOVE_SOLDIERS ? "#f59e0b" : "#3b82f6";
++            const icon=order.type===ORDER_TYPES.MOVE_SOLDIERS ? "💂" : "🧑‍🌾";
++            this.ctx.beginPath(); this.ctx.moveTo(start.x,start.y); this.ctx.lineTo(end.x,end.y);
++            this.ctx.strokeStyle=color; this.ctx.lineWidth=4; this.ctx.stroke();
++            this.ctx.fillStyle=color; this.ctx.beginPath();
++            this.ctx.arc((start.x+end.x)/2,(start.y+end.y)/2,12,0,Math.PI*2); this.ctx.fill();
++            this.ctx.fillStyle="#fff"; this.ctx.font="bold 10px sans-serif";
++            this.ctx.textAlign="center"; this.ctx.textBaseline="middle";
++            this.ctx.fillText(`${icon}${order.amount}`,(start.x+end.x)/2,(start.y+end.y)/2);
++        }
++
++        for (const key of visibleKeys) {
++            const pop=state.population.get(key); if(!pop) continue;
++            const {q,r}=parseTileKey(key), {x,y}=this.axialToPixel(q,r);
++            this.ctx.fillStyle="#fff"; this.ctx.font="12px sans-serif";
++            this.ctx.textAlign="center"; this.ctx.textBaseline="alphabetic";
++            this.ctx.fillText(`🧑‍🌾:${pop.civilians}💂:${pop.soldiers}👶:${pop.babies}`,x,y);
++        }
++    }
++
++    drawFog(x,y) {
++        this.ctx.beginPath();
++        for(let i=0;i<6;i++){
++            const a=Math.PI/3*i+Math.PI/6, hx=x+this.tileSize*Math.cos(a), hy=y+this.tileSize*Math.sin(a);
++            if(i===0)this.ctx.moveTo(hx,hy); else this.ctx.lineTo(hx,hy);
++        }
++        this.ctx.closePath(); this.ctx.fillStyle="#111827"; this.ctx.fill();
++    }
++
++    drawHex(x,y,fill,isSelected=false) {
++        this.ctx.beginPath();
++        for(let i=0;i<6;i++){
++            const a=Math.PI/3*i+Math.PI/6, hx=x+this.tileSize*Math.cos(a), hy=y+this.tileSize*Math.sin(a);
++            if(i===0)this.ctx.moveTo(hx,hy); else this.ctx.lineTo(hx,hy);
++        }
++        this.ctx.closePath(); this.ctx.fillStyle=fill; this.ctx.fill();
++        this.ctx.strokeStyle=isSelected?"#fbbf24":"#fff"; this.ctx.lineWidth=isSelected?4:2; this.ctx.stroke();
++    }
++}
++
++const game = createGame();
++const engine = game.engine;
++const log = new GameLog();
++const canvas = document.getElementById("gameCanvas");
++const renderer = new BoardRenderer(canvas);
++
++let currentPlayerIndex=0;
++let currentPlayer=engine.getState().players[0];
++let ordersByPlayer={};
++let pendingOrders=[];
++let selectedKey=null;
++let targetKey=null;
++let selectedUnitType=ORDER_TYPES.MOVE_SOLDIERS;
++
++function availableUnits(tileKeyValue){
++    const pop=engine.getState().population.get(tileKeyValue);
++    if(!pop) return {soldiers:0,civilians:0};
++    let s=0,c=0;
++    for(const o of pendingOrders){
++        if(o.from!==tileKeyValue) continue;
++        if(o.type===ORDER_TYPES.MOVE_SOLDIERS)s+=o.amount;
++        else c+=o.amount;
++    }
++    return {soldiers:Math.max(0,pop.soldiers-s),civilians:Math.max(0,pop.civilians-c)};
++}
++
++function render(){
++    const state=engine.getState();
++    document.getElementById("turnIndicator").textContent=`${currentPlayer.name}'s turn to give orders`;
++    document.getElementById("turnIndicator").style.borderColor=currentPlayer.color;
++    const last=currentPlayerIndex===state.players.length-1;
++    document.getElementById("endTurnBtn").textContent=last?"Submit Orders & Resolve Round":`Submit Orders (pass to ${state.players[currentPlayerIndex+1].name})`;
++    document.getElementById("gameLog").innerHTML=log.getPlayerLog(currentPlayer.id).map(e=>`<div class="gameLogEntry log-${e.type}">${e.message}</div>`).join("");
++    const visible=getVisibleTileKeys(game,currentPlayer.id);
++    renderer.render(game.board,state,visible,selectedKey,pendingOrders);
++    let total={civilians:0,soldiers:0,babies:0};
++    for(const pop of state.population.values()){
++        if(pop.ownerId!==currentPlayer.id)continue;
++        total.civilians+=pop.civilians; total.soldiers+=pop.soldiers; total.babies+=pop.babies;
++    }
++    document.getElementById("populationStatus").textContent=`Population — 🧑‍🌾 Civilians: ${total.civilians} | 💂 Soldiers: ${total.soldiers} | 👶 Babies: ${total.babies}`;
++}
++
++function updateOrderInputLimits(){
++    if(!selectedKey||!targetKey)return;
++    const state=engine.getState(), avail=availableUnits(selectedKey);
++    const dest=state.population.get(targetKey);
++    const friendly=dest?.ownerId===currentPlayer.id;
++    const civ=document.getElementById("toggleCivilianBtn"), sol=document.getElementById("toggleSoldierBtn");
++    civ.disabled=!friendly;
++    if(!friendly&&selectedUnitType===ORDER_TYPES.MOVE_CIVILIANS){
++        selectedUnitType=ORDER_TYPES.MOVE_SOLDIERS;
++        sol.classList.add("active"); civ.classList.remove("active");
++    }
++    const max=selectedUnitType===ORDER_TYPES.MOVE_SOLDIERS?avail.soldiers:avail.civilians;
++    const input=document.getElementById("unitCountInput");
++    input.max=max; input.value=max>0?1:0;
++}
++
++function hideOrderPanel(){document.getElementById("orderPanel").style.display="none";}
++function showOrderPanel(){
++    document.getElementById("orderInfo").textContent=`Move (${selectedKey}) ➔ (${targetKey})`;
++    updateOrderInputLimits();
++    document.getElementById("orderPanel").style.display="flex";
++}
++
++function submitOrders(){
++    ordersByPlayer[currentPlayer.id]=pendingOrders;
++    pendingOrders=[]; selectedKey=null; targetKey=null; hideOrderPanel();
++
++    if(currentPlayerIndex<engine.getState().players.length-1){
++        currentPlayerIndex++;
++        currentPlayer=engine.getState().players[currentPlayerIndex];
++        document.getElementById("ratioSlider").value=currentPlayer.civilianRatio*100;
++        document.getElementById("ratioValue").textContent=`${currentPlayer.civilianRatio*100}%`;
++        render(); return;
++    }
++
++    const validation=engine.validateOrders(ordersByPlayer);
++    if(!validation.valid){
++        for(const error of validation.errors) log.add(`❌ ${error}`,[currentPlayer.id],"error");
++        render(); return;
++    }
++
++    try{
++        const result=engine.simulateTurn(ordersByPlayer);
++        for(const event of result.events) {
++            if(event.type==="edgeBattle"){
++                log.add(`⚔️ Armies collide between ${event.from} and ${event.to}! Player ${event.winnerId} wins with ${event.survivingSoldiers}💂`,event.visibleTo,"attack");
++            } else if(event.type==="battle"){
++                log.add(`⚔️ Battle at ${event.destination}: Player ${event.winnerId} wins with ${event.survivingSoldiers}💂`,event.visibleTo,"victory");
++            } else if(event.type==="growth"){
++                log.add(`🌱 Population grows by ${event.amount}`,event.visibleTo,"growth");
++            }
++        }
++        if(result.gameOver) log.add(`🏆 Player ${result.winnerId} wins!`,engine.getState().players.map(p=>p.id),"victory");
++    } catch(error) {
++        log.add(`❌ ${error.message}`,[currentPlayer.id],"error");
++    }
++
++    ordersByPlayer={};
++    currentPlayerIndex=0;
++    currentPlayer=engine.getState().players[0];
++    document.getElementById("ratioSlider").value=currentPlayer.civilianRatio*100;
++    document.getElementById("ratioValue").textContent=`${currentPlayer.civilianRatio*100}%`;
++    log.add("--- Round Complete ---",engine.getState().players.map(p=>p.id));
++    render();
++}
++
++canvas.addEventListener("click",e=>{
++    const rect=canvas.getBoundingClientRect();
++    const tile=renderer.getTileAtPixel(e.clientX-rect.left,e.clientY-rect.top,game.board);
++    if(!tile)return;
++    const clicked=tileKey(tile.q,tile.r);
++    const visible=getVisibleTileKeys(game,currentPlayer.id);
++    if(!visible.has(clicked))return;
++
++    const state=engine.getState();
++    if(!selectedKey){
++        const pop=state.population.get(clicked), avail=availableUnits(clicked);
++        if(pop?.ownerId===currentPlayer.id&&(avail.soldiers>0||avail.civilians>0))selectedKey=clicked;
++    } else {
++        const [sq,sr]=selectedKey.split(",").map(Number);
++        if(game.board.getNeighbors(sq,sr).some(n=>n.q===tile.q&&n.r===tile.r)){
++            targetKey=clicked; showOrderPanel();
++        } else if(state.population.get(clicked)?.ownerId===currentPlayer.id){
++            selectedKey=clicked; hideOrderPanel();
++        } else { selectedKey=null; hideOrderPanel(); }
++    }
++    render();
++});
++
++document.getElementById("toggleSoldierBtn").onclick=()=>{
++    selectedUnitType=ORDER_TYPES.MOVE_SOLDIERS;
++    document.getElementById("toggleSoldierBtn").classList.add("active");
++    document.getElementById("toggleCivilianBtn").classList.remove("active");
++    updateOrderInputLimits();
++};
++
++document.getElementById("toggleCivilianBtn").onclick=()=>{
++    selectedUnitType=ORDER_TYPES.MOVE_CIVILIANS;
++    document.getElementById("toggleCivilianBtn").classList.add("active");
++    document.getElementById("toggleSoldierBtn").classList.remove("active");
++    updateOrderInputLimits();
++};
++
++document.getElementById("confirmOrderBtn").onclick=()=>{
++    const amount=parseInt(document.getElementById("unitCountInput").value,10);
++    if(amount>0&&selectedKey&&targetKey){
++        pendingOrders.push(new Order(selectedUnitType,currentPlayer.id,selectedKey,targetKey,amount));
++        selectedKey=null; targetKey=null; hideOrderPanel(); render();
++    }
++};
++
++document.getElementById("cancelOrderBtn").onclick=()=>{
++    selectedKey=null; targetKey=null; hideOrderPanel(); render();
++};
++
++document.getElementById("endTurnBtn").onclick=submitOrders;
++document.getElementById("showStateBtn").onclick=()=>{
++    document.getElementById("stateOutput").textContent=JSON.stringify(engine.getStateSnapshot(),null,2);
++};
++document.getElementById("simulateEmptyBtn").onclick=()=>{
++    try { const result=engine.simulateTurn({}); log.add(`Turn ${engine.getState().turn} simulated.`,engine.getState().players.map(p=>p.id)); }
++    catch(e){ log.add(`❌ ${e.message}`,[currentPlayer.id],"error"); }
++    render();
++};
+ 
+-    <script type="module" src="main.js"></script>
++render();
++</script>
+ </body>
+ </html>
+diff --git a/movement.js b/movement.js
+new file mode 100644
+index 0000000..bdefe06
+--- /dev/null
++++ b/movement.js
+@@ -0,0 +1,156 @@
++import { ORDER_TYPES, flattenOrders } from "./orders.js";
++import { TilePopulation } from "./state.js";
++
++/**
++ * Movement phase.
++ *
++ * All departures are applied first from the start-of-turn state. Soldier
++ * arrivals are kept separate from the destination state so that they can be
++ * resolved simultaneously later.
++ *
++ * Reciprocal soldier moves (A -> B and B -> A) are detected explicitly.
++ * Those armies meet on the edge instead of silently passing through one
++ * another.
++ */
++
++export class MovementResolver {
++    resolve(state, ordersByPlayerId, events = []) {
++        const nextState = state.clone();
++        const soldierArrivals = new Map();
++        const civilianArrivals = [];
++
++        const addArrival = (to, arrival) => {
++            if (!soldierArrivals.has(to)) soldierArrivals.set(to, []);
++            soldierArrivals.get(to).push(arrival);
++        };
++
++        const soldierOrders = flattenOrders(ordersByPlayerId)
++            .filter(order => order.type === ORDER_TYPES.MOVE_SOLDIERS);
++
++        // First pass: remove every moving unit from its source.
++        // This makes movement simultaneous rather than order-dependent.
++        for (const [playerIdString, orders] of Object.entries(ordersByPlayerId)) {
++            const playerId = Number(playerIdString);
++            const player = nextState.getPlayerById(playerId);
++
++            for (const order of orders) {
++                const source = nextState.population.get(order.from);
++                if (!source) continue;
++
++                if (order.type === ORDER_TYPES.MOVE_SOLDIERS) {
++                    source.soldiers -= order.amount;
++
++                    addArrival(order.to, {
++                        playerId,
++                        amount: order.amount,
++                        from: order.from
++                    });
++
++                    events.push({
++                        type: "movement",
++                        playerId,
++                        from: order.from,
++                        to: order.to,
++                        unitType: "soldiers",
++                        amount: order.amount,
++                        visibleTo: nextState.players.map(p => p.id)
++                    });
++                }
++
++                if (order.type === ORDER_TYPES.MOVE_CIVILIANS) {
++                    source.civilians -= order.amount;
++                    civilianArrivals.push(order);
++                }
++            }
++        }
++
++        // Civilian moves don't participate in combat.
++        for (const order of civilianArrivals) {
++            const destination = nextState.population.get(order.to);
++            if (!destination) {
++                nextState.population.set(
++                    order.to,
++                    new TilePopulation(null, 0, 0, 0)
++                );
++            }
++
++            nextState.population.get(order.to).civilians += order.amount;
++
++            events.push({
++                type: "civilianMovement",
++                playerId: order.playerId,
++                from: order.from,
++                to: order.to,
++                amount: order.amount,
++                visibleTo: [order.playerId]
++            });
++        }
++
++        const edgeBattles = this.findReciprocalBattles(soldierOrders);
++
++        return {
++            state: nextState,
++            soldierArrivals,
++            edgeBattles,
++            events
++        };
++    }
++
++    findReciprocalBattles(soldierOrders) {
++        const byEdge = new Map();
++
++        for (const order of soldierOrders) {
++            const endpoints = [order.from, order.to].sort();
++            const edgeKey = `${endpoints[0]}|${endpoints[1]}`;
++
++            if (!byEdge.has(edgeKey)) byEdge.set(edgeKey, []);
++            byEdge.get(edgeKey).push(order);
++        }
++
++        const battles = [];
++
++        for (const orders of byEdge.values()) {
++            const byDirection = new Map();
++
++            for (const order of orders) {
++                const key = `${order.from}->${order.to}`;
++                byDirection.set(
++                    key,
++                    (byDirection.get(key) || 0) + order.amount
++                );
++            }
++
++            if (byDirection.size !== 2) continue;
++
++            const [first, second] = [...byDirection.keys()];
++            const [firstFrom, firstTo] = first.split("->");
++            const [secondFrom, secondTo] = second.split("->");
++
++            if (firstFrom !== secondTo || firstTo !== secondFrom) continue;
++
++            const firstOrder = orders.find(
++                order => order.from === firstFrom && order.to === firstTo
++            );
++            const secondOrder = orders.find(
++                order => order.from === secondFrom && order.to === secondTo
++            );
++
++            battles.push({
++                a: {
++                    playerId: firstOrder.playerId,
++                    from: firstFrom,
++                    to: firstTo,
++                    amount: byDirection.get(first)
++                },
++                b: {
++                    playerId: secondOrder.playerId,
++                    from: secondFrom,
++                    to: secondTo,
++                    amount: byDirection.get(second)
++                }
++            });
++        }
++
++        return battles;
++    }
++}
+diff --git a/orders.js b/orders.js
+new file mode 100644
+index 0000000..f48bd82
+--- /dev/null
++++ b/orders.js
+@@ -0,0 +1,59 @@
++/**
++ * Orders are immutable declarations of intent.
++ */
++
++export const ORDER_TYPES = Object.freeze({
++    MOVE_SOLDIERS: "moveSoldiers",
++    MOVE_CIVILIANS: "moveCivilians"
++});
++
++export class Order {
++    constructor(type, playerId, from, to, amount) {
++        this.type = type;
++        this.playerId = playerId;
++        this.from = from;
++        this.to = to;
++        this.amount = amount;
++        Object.freeze(this);
++    }
++
++    isSoldierMove() {
++        return this.type === ORDER_TYPES.MOVE_SOLDIERS;
++    }
++
++    isCivilianMove() {
++        return this.type === ORDER_TYPES.MOVE_CIVILIANS;
++    }
++
++    static fromJSON(value) {
++        return new Order(
++            value.type,
++            value.playerId,
++            value.from,
++            value.to,
++            Number(value.amount)
++        );
++    }
++}
++
++export function normalizeOrders(ordersByPlayerId, players) {
++    const normalized = {};
++
++    for (const player of players) {
++        const orders = ordersByPlayerId?.[player.id] ?? [];
++
++        if (!Array.isArray(orders)) {
++            throw new Error(`Orders for ${player.name} must be an array.`);
++        }
++
++        normalized[player.id] = orders.map(order =>
++            order instanceof Order ? order : Order.fromJSON(order)
++        );
++    }
++
++    return normalized;
++}
++
++export function flattenOrders(ordersByPlayerId) {
++    return Object.values(ordersByPlayerId).flat();
++}
+diff --git a/package.json b/package.json
+new file mode 100644
+index 0000000..089153b
+--- /dev/null
++++ b/package.json
+@@ -0,0 +1 @@
++{"type":"module"}
+diff --git a/resolution.js b/resolution.js
+new file mode 100644
+index 0000000..89d4c82
+--- /dev/null
++++ b/resolution.js
+@@ -0,0 +1,170 @@
++import { MovementResolver } from "./movement.js";
++import { ConflictResolver } from "./combat.js";
++import { GrowthResolver } from "./growth.js";
++import { VictoryResolver } from "./victory.js";
++
++export class TurnResolver {
++    constructor({
++        movement = new MovementResolver(),
++        combat = new ConflictResolver(),
++        growth = new GrowthResolver(),
++        victory = new VictoryResolver()
++    } = {}) {
++        this.movement = movement;
++        this.combat = combat;
++        this.growth = growth;
++        this.victory = victory;
++    }
++
++    resolve(state, ordersByPlayerId) {
++        const events = [];
++        const movementResult = this.movement.resolve(state, ordersByPlayerId, events);
++        const workingState = movementResult.state;
++
++        const edgeArrivals = this.resolveEdgeBattles(
++            workingState,
++            movementResult.edgeBattles,
++            events
++        );
++        this.resolveDestinationBattles(
++            workingState,
++            movementResult.soldierArrivals,
++            movementResult.edgeBattles,
++            edgeArrivals,
++            events
++        );
++
++        const growthResult = this.growth.resolve(workingState, events);
++        const victoryResult = this.victory.resolve(growthResult.state, events);
++        const finalState = victoryResult.state;
++        finalState.turn++;
++
++        return {
++            state: finalState,
++            events,
++            winnerId: victoryResult.winnerId,
++            gameOver: victoryResult.gameOver
++        };
++    }
++
++    resolveEdgeBattles(state, edgeBattles, events) {
++        // Edge battles are resolved here, but their winners are represented as
++        // synthetic arrivals so that a winner can still fight a defender (or
++        // other incoming armies) at the destination in the normal destination
++        // combat phase.
++        const syntheticArrivals = new Map();
++
++        for (const battle of edgeBattles) {
++            const result = this.combat.resolve([
++                { playerId: battle.a.playerId, amount: battle.a.amount, isDefender: false },
++                { playerId: battle.b.playerId, amount: battle.b.amount, isDefender: false }
++            ]);
++
++            const winnerId = result.winnerId;
++            const winnerOrder = winnerId === battle.a.playerId ? battle.a : battle.b;
++            const arrival = {
++                playerId: winnerId,
++                amount: result.survivingSoldiers,
++                from: winnerOrder.from,
++                to: winnerOrder.to,
++                syntheticEdgeArrival: true
++            };
++
++            if (!syntheticArrivals.has(arrival.to)) syntheticArrivals.set(arrival.to, []);
++            syntheticArrivals.get(arrival.to).push(arrival);
++
++            events.push({
++                type: "edgeBattle",
++                from: battle.a.from,
++                to: battle.a.to,
++                players: [battle.a.playerId, battle.b.playerId],
++                winnerId,
++                survivingSoldiers: result.survivingSoldiers,
++                rounds: result.rounds,
++                visibleTo: state.players.map(player => player.id)
++            });
++        }
++
++        return syntheticArrivals;
++    }
++
++    resolveDestinationBattles(state, arrivals, edgeBattles, edgeArrivals, events) {
++        const consumed = new Set();
++        for (const battle of edgeBattles) {
++            consumed.add(`${battle.a.from}->${battle.a.to}`);
++            consumed.add(`${battle.b.from}->${battle.b.to}`);
++        }
++
++        const destinations = new Set([
++            ...arrivals.keys(),
++            ...edgeArrivals.keys()
++        ]);
++
++        for (const destination of destinations) {
++            const incoming = [
++                ...(arrivals.get(destination) ?? []).filter(a => !consumed.has(`${a.from}->${a.to}`)),
++                ...(edgeArrivals.get(destination) ?? [])
++            ];
++            if (!incoming.length) continue;
++
++            const destinationPop = this.getOrCreatePopulation(state, destination);
++            const defenderId = destinationPop.ownerId;
++            const defender = defenderId !== null && destinationPop.soldiers > 0
++                ? { playerId: defenderId, amount: destinationPop.soldiers, isDefender: true }
++                : null;
++
++            const attackers = incoming
++                .filter(a => a.playerId !== defenderId)
++                .map(a => ({ playerId: a.playerId, amount: a.amount, isDefender: false }));
++
++            const reinforcements = incoming.filter(a => a.playerId === defenderId);
++            for (const reinforcement of reinforcements) {
++                destinationPop.soldiers += reinforcement.amount;
++                events.push({
++                    type: "reinforcement",
++                    playerId: reinforcement.playerId,
++                    destination,
++                    amount: reinforcement.amount,
++                    visibleTo: state.players.map(player => player.id)
++                });
++            }
++
++            if (!attackers.length) continue;
++
++            const result = this.combat.resolve(
++                defender ? [...attackers, defender] : attackers
++            );
++
++            const oldOwnerId = destinationPop.ownerId;
++            const captured = oldOwnerId !== null && result.winnerId !== oldOwnerId;
++            if (captured) {
++                destinationPop.civilians = 0;
++                destinationPop.babies = 0;
++            }
++
++            destinationPop.ownerId = result.winnerId;
++            destinationPop.soldiers = result.survivingSoldiers;
++
++            events.push({
++                type: "battle",
++                destination,
++                attackers: attackers.map(a => ({ playerId: a.playerId, amount: a.amount })),
++                defender,
++                winnerId: result.winnerId,
++                survivingSoldiers: result.survivingSoldiers,
++                rounds: result.rounds,
++                captured,
++                visibleTo: state.players.map(player => player.id)
++            });
++        }
++    }
++
++    getOrCreatePopulation(state, key) {
++        let pop = state.population.get(key);
++        if (!pop) {
++            pop = { ownerId: null, civilians: 0, soldiers: 0, babies: 0 };
++            state.population.set(key, pop);
++        }
++        return pop;
++    }
++}
+diff --git a/state.js b/state.js
+index 4544bea..457d64a 100644
+--- a/state.js
++++ b/state.js
+@@ -1,24 +1,21 @@
+-/*
+- * state.js
+- *
+- * Everything here is DATA: what the current situation IS, not what's
+- * allowed to happen to it. No method in this file decides whether a
+- * move is legal, resolves a battle, or grows a population -- that's
+- * rules.js. This file only holds, copies, and serializes state.
+- *
+- * Keeping this boundary strict is what makes save/load, undo, and
+- * "simulate a hypothetical turn on a cloned state" possible later
+- * without rewriting anything here.
++/**
++ * State is data.
++ * It knows how to copy/serialize itself, but it does not resolve rules.
+  */
+ 
+ export class Player {
+-    constructor(id, name, color, score) {
++    constructor(id, name, color, score = 0) {
+         this.id = id;
+         this.name = name;
+         this.color = color;
+         this.score = score;
+         this.civilianRatio = 0.5;
+-        this.isEliminated = false;
++    }
++
++    clone() {
++        const copy = new Player(this.id, this.name, this.color, this.score);
++        copy.civilianRatio = this.civilianRatio;
++        return copy;
+     }
+ }
+ 
+@@ -29,89 +26,48 @@ export class TilePopulation {
+         this.soldiers = soldiers;
+         this.babies = babies;
+     }
+-}
+-
+-export class GameLog {
+-    constructor() {
+-        this.entries = [];
+-    }
+-
+-    add(message, visibleTo = [], type = "default") {
+-        this.entries.push({ message, visibleTo, type, turn: this.entries.length });
+-    }
+-
+-    getPlayerLog(playerId) {
+-        return this.entries.filter(e => !e.visibleTo.length || e.visibleTo.includes(playerId));
+-    }
+ 
+-    clear() {
+-        this.entries = [];
++    clone() {
++        return new TilePopulation(
++            this.ownerId,
++            this.civilians,
++            this.soldiers,
++            this.babies
++        );
+     }
+ }
+ 
+-// A GameLog with the same interface that discards everything it's given.
+-// Intended for headless/simulated turns (e.g. an AI trying out hypothetical
+-// moves) where you want resolveTurn() to run exactly as normal but don't
+-// want narrative log entries generated for every trial.
+-export class NullGameLog {
+-    add() {}
+-    getPlayerLog() { return []; }
+-    clear() {}
+-}
+-
+ export class GameState {
+     constructor(players = [], population = new Map(), turn = 0) {
+         this.players = players;
+         this.population = population;
+         this.turn = turn;
+-        this.isGameOver = false;
+-        this.winnerId = null;
+-    }
+-
+-    getPlayerById(id) {
+-        return this.players.find(p => p.id === id);
+     }
+ 
+     clone() {
+-        const players = this.players.map(p => {
+-            const copy = new Player(p.id, p.name, p.color, p.score);
+-            copy.civilianRatio = p.civilianRatio;
+-            copy.isEliminated = p.isEliminated;
+-            return copy;
+-        });
+-
++        const players = this.players.map(player => player.clone());
+         const population = new Map();
+ 
+         for (const [key, pop] of this.population) {
+-            population.set(
+-                key,
+-                new TilePopulation(
+-                    pop.ownerId,
+-                    pop.civilians,
+-                    pop.soldiers,
+-                    pop.babies
+-                )
+-            );
++            population.set(key, pop.clone());
+         }
+ 
+-        const newState = new GameState(players, population, this.turn);
+-        newState.isGameOver = this.isGameOver;
+-        newState.winnerId = this.winnerId;
+-        return newState;
++        return new GameState(players, population, this.turn);
++    }
++
++    getPlayerById(id) {
++        return this.players.find(player => player.id === id);
+     }
+ 
+     serialize() {
+         return {
+             turn: this.turn,
+-            isGameOver: this.isGameOver,
+-            winnerId: this.winnerId,
+-            players: this.players.map(p => ({
+-                id: p.id,
+-                name: p.name,
+-                color: p.color,
+-                score: p.score,
+-                civilianRatio: p.civilianRatio,
+-                isEliminated: p.isEliminated
++            players: this.players.map(player => ({
++                id: player.id,
++                name: player.name,
++                color: player.color,
++                score: player.score,
++                civilianRatio: player.civilianRatio
+             })),
+             population: Object.fromEntries(
+                 [...this.population.entries()].map(([key, pop]) => [
+diff --git a/validation.js b/validation.js
+new file mode 100644
+index 0000000..890a826
+--- /dev/null
++++ b/validation.js
+@@ -0,0 +1,131 @@
++import { areNeighbors, parseTileKey } from "./geometry.js";
++import { ORDER_TYPES, flattenOrders } from "./orders.js";
++
++/**
++ * Validation is deliberately separate from resolution.
++ *
++ * Important: validation examines the beginning-of-turn state. It does not
++ * mutate state and does not attempt to decide the outcome of conflicts.
++ */
++
++export class OrderValidator {
++    constructor(board) {
++        this.board = board;
++    }
++
++    validate(state, ordersByPlayerId) {
++        const errors = [];
++        const orders = flattenOrders(ordersByPlayerId);
++
++        for (const player of state.players) {
++            const playerOrders = ordersByPlayerId[player.id] ?? [];
++            const committed = new Map();
++
++            for (const order of playerOrders) {
++                const result = this.validateOrder(state, order, player.id);
++
++                if (!result.valid) {
++                    errors.push(`${player.name}: ${result.error}`);
++                    continue;
++                }
++
++                const key = `${order.from}:${order.type}`;
++                committed.set(key, (committed.get(key) || 0) + order.amount);
++            }
++
++            // A player may split an army/civilian population across multiple
++            // destinations, but may not spend the same units twice.
++            for (const [commitKey, amount] of committed) {
++                const separator = commitKey.lastIndexOf(":");
++                const from = commitKey.slice(0, separator);
++                const type = commitKey.slice(separator + 1);
++                const pop = state.population.get(from);
++                if (!pop) continue;
++
++                const available = type === ORDER_TYPES.MOVE_SOLDIERS
++                    ? pop.soldiers
++                    : pop.civilians;
++
++                if (amount > available) {
++                    errors.push(
++                        `${player.name}: submitted ${amount} units from ${from}, ` +
++                        `but only ${available} are available.`
++                    );
++                }
++            }
++        }
++
++        // Catch orders attributed to unknown players.
++        const knownPlayerIds = new Set(state.players.map(player => player.id));
++        for (const order of orders) {
++            if (!knownPlayerIds.has(order.playerId)) {
++                errors.push(`Unknown player ID ${order.playerId} submitted an order.`);
++            }
++        }
++
++        return {
++            valid: errors.length === 0,
++            errors
++        };
++    }
++
++    validateOrder(state, order, playerId) {
++        if (!order || order.playerId !== playerId) {
++            return { valid: false, error: "order contains the wrong player ID." };
++        }
++
++        if (!Number.isInteger(order.amount) || order.amount <= 0) {
++            return { valid: false, error: "order amount must be a positive integer." };
++        }
++
++        const source = state.population.get(order.from);
++        if (!source || source.ownerId !== playerId) {
++            return { valid: false, error: `cannot move units from ${order.from}.` };
++        }
++
++        const from = parseTileKey(order.from);
++        const to = parseTileKey(order.to);
++
++        if (!this.board.hasTile(to.q, to.r) || !areNeighbors(from, to)) {
++            return {
++                valid: false,
++                error: `${order.from} to ${order.to} is not an adjacent board tile.`
++            };
++        }
++
++        if (order.type === ORDER_TYPES.MOVE_SOLDIERS) {
++            if (source.soldiers < order.amount) {
++                return {
++                    valid: false,
++                    error: `only ${source.soldiers} soldiers are available at ${order.from}.`
++                };
++            }
++
++            return { valid: true };
++        }
++
++        if (order.type === ORDER_TYPES.MOVE_CIVILIANS) {
++            const destination = state.population.get(order.to);
++
++            // Civilian movement is intentionally restricted to a friendly
++            // destination in the starting state.
++            if (!destination || destination.ownerId !== playerId) {
++                return {
++                    valid: false,
++                    error: `civilians may only move to a tile you own (${order.to}).`
++                };
++            }
++
++            if (source.civilians < order.amount) {
++                return {
++                    valid: false,
++                    error: `only ${source.civilians} civilians are available at ${order.from}.`
++                };
++            }
++
++            return { valid: true };
++        }
++
++        return { valid: false, error: `unknown order type "${order.type}".` };
++    }
++}
+diff --git a/victory.js b/victory.js
+new file mode 100644
+index 0000000..4a7b23c
+--- /dev/null
++++ b/victory.js
+@@ -0,0 +1,32 @@
++/**
++ * Victory conditions live here rather than inside movement/combat.
++ * This makes alternate victory conditions possible later.
++ */
++
++export class VictoryResolver {
++    resolve(state, events = []) {
++        const alivePlayers = state.players.filter(player =>
++            [...state.population.values()].some(
++                pop => pop.ownerId === player.id &&
++                       (pop.soldiers > 0 || pop.civilians > 0 || pop.babies > 0)
++            )
++        );
++
++        const winner = alivePlayers.length === 1 ? alivePlayers[0] : null;
++
++        if (winner) {
++            events.push({
++                type: "victory",
++                playerId: winner.id,
++                visibleTo: state.players.map(player => player.id)
++            });
++        }
++
++        return {
++            state,
++            winnerId: winner?.id ?? null,
++            gameOver: Boolean(winner),
++            events
++        };
++    }
++}
