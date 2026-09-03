@@ -40,6 +40,36 @@ describe('TurnResolver', () => {
         expect(destTile.soldiers).toBeGreaterThan(0);
     });
 
+    test('resolves reciprocal edge battle with one victor', () => {
+        const population = new Map([
+            [tileKey(0, 0), new TilePopulation(1, 0, 5, 0)], // Player 1: 5 soldiers at (0,0)
+            [tileKey(1, 0), new TilePopulation(2, 0, 3, 0)]  // Player 2: 3 soldiers at (1,0)
+        ]);
+        const state = new GameState([new Player(1, "P1"), new Player(2, "P2")], population, 1);
+
+        const orders = {
+            1: [{ playerId: 1, type: "moveSoldiers", from: tileKey(0, 0), to: tileKey(1, 0), amount: 5 }],
+            2: [{ playerId: 2, type: "moveSoldiers", from: tileKey(1, 0), to: tileKey(0, 0), amount: 3 }]
+        };
+
+        // Inject deterministic RNG to ensure P1 wins
+        const resolver = new TurnResolver();
+        resolver.combat.random = createMockRng([0.9, 0.1]); // P1 rolls high, P2 rolls low
+
+        const result = resolver.resolve(state, orders);
+
+        // P1 wins the edge battle and advances to (1,0)
+        const destTile = result.state.population.get(tileKey(1, 0));
+        expect(destTile.ownerId).toBe(1);
+        expect(destTile.soldiers).toBeGreaterThan(0);
+
+        // P2's soldiers are eliminated, and (0,0) is empty
+        const originTile = result.state.population.get(tileKey(0, 0));
+        console.log("HI");
+        console.log(result);
+        expect(originTile.soldiers).toBe(0);
+    });
+
     test('handles attacker entering a tile whose defender is simultaneously vacating', () => {
         const population = new Map([
             [tileKey(0, 0), new TilePopulation(1, 0, 3, 0)], // P1 at (0,0)
