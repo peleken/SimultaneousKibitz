@@ -67,6 +67,14 @@ button:disabled { background:#555; cursor:not-allowed; }
     </div>
 
     <pre id="stateOutput"></pre>
+
+    <div class="panel" style="width:80%;box-sizing:border-box;flex-direction:column;align-items:stretch;">
+        <label for="ordersJsonInput" style="text-align:left;">Submit Orders JSON (object keyed by player id, e.g. <code>{"1": [{"type":"moveSoldiers","playerId":1,"from":"0,0","to":"1,0","amount":3}], "2": []}</code>)</label>
+        <textarea id="ordersJsonInput" rows="6" style="width:100%;box-sizing:border-box;background:#111827;color:#d1d5db;font-family:monospace;font-size:11px;border-radius:6px;border:1px solid #374151;padding:8px;"></textarea>
+        <div>
+            <button id="submitJsonOrdersBtn">Submit Orders JSON</button>
+        </div>
+    </div>
 </div>
 
 <!-- Application bootstrap. All game/UI behavior lives in the JS modules. -->
