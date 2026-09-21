@@ -1,9 +1,11 @@
 {
   "type": "module",
   "scripts": {
+    "start": "vite",
     "test": "vitest"
   },
   "devDependencies": {
+    "vite": "^8.3.0",
     "vitest": "^4.1.11"
   }
 }

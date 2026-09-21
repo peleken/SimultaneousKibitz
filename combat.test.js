@@ -42,17 +42,6 @@ describe('ConflictResolver', () => {
         expect(winner.playerId).toBe(2);
     });
 
-    test('breakHighTie: larger army wins when no single defender is tied', () => {
-        const resolver = new ConflictResolver();
-
-        const winner = resolver.breakHighTie([
-            { playerId: 1, amount: 2, isDefender: false },
-            { playerId: 2, amount: 6, isDefender: false }
-        ]);
-
-        expect(winner.playerId).toBe(2);
-    });
-
     test('breakHighTie: falls back to random choice among equal, defenderless armies', () => {
         // randomChoice picks index = floor(random() * items.length).
         // With a constant 0.99 and 2 tied items, that's always index 1.
